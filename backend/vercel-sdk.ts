@@ -149,7 +149,8 @@ export function router(routes:Record<string,RouterMiddleware[]>){
       ?(req.headers.authorization||'').slice(7):'';
     const ctx:Context={params,body:req.body||{},bearer};
     try{
-      if(!process.env.SUPABASE_URL&&!process.env.VITE_SUPABASE_URL)
+      if((!process.env.SUPABASE_URL&&!process.env.VITE_SUPABASE_URL)||
+        !process.env.SUPABASE_SERVICE_ROLE_KEY)
         throw Error('Supabase backend environment is not configured');
       let outcome:Reply|void=undefined;
       for(const item of selected.middleware){

@@ -38,6 +38,8 @@ const cases={
   'Vercel API route uses existing backend':apiFunction.includes("from '../backend/index'"),
   'Supabase authenticated JWT checked server-side':adapter.includes('auth.getUser(ctx.bearer)'),
   'Supabase records are private':databaseSql.includes('enable row level security'),
+  'Supabase transaction is caller-privileged':databaseSql.includes('security invoker')&&!databaseSql.includes('security definer'),
+  'Server key is required even for healthcheck':adapter.includes('!process.env.SUPABASE_SERVICE_ROLE_KEY'),
   'Atomic transaction with per-record lock':databaseSql.includes('pg_advisory_xact_lock')&&databaseSql.includes('cp_apply_batch'),
   'Server-only service key is not used in Vite client':!platform.includes('SUPABASE_SERVICE_ROLE_KEY'),
   'Private signed storage URLs':adapter.includes('createSignedUrl(path,300)'),

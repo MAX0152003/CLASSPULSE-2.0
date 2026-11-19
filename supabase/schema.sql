@@ -18,7 +18,7 @@ grant select,insert,update,delete on public.cp_records to service_role;
 create or replace function public.cp_apply_batch(operations jsonb)
 returns jsonb
 language plpgsql
-security definer
+security invoker
 set search_path=public
 as $$
 declare
@@ -34,7 +34,7 @@ declare
   op_results jsonb;
   all_results jsonb := '[]'::jsonb;
 begin
-  if auth.role() is distinct from 'service_role' then
+  if current_user <> 'service_role' then
     raise exception 'Only the authenticated server may update ClassPulse records'
       using errcode='42501';
   end if;
