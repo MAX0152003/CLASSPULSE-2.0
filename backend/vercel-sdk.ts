@@ -2,7 +2,7 @@ import {createClient,type SupabaseClient} from '@supabase/supabase-js';
 import {randomUUID} from 'node:crypto';
 import type {VercelRequest,VercelResponse} from '@vercel/node';
 
-type User={userId:string;email?:string;name?:string};
+type User={userId:string;email?:string;name?:string;signupRole?:'Student'|'Faculty';studentNumber?:string};
 type Context={user?:User;body:unknown;params:Record<string,string>;bearer?:string};
 type Reply={__cp:true;status:number;payload:unknown};
 export type RouterMiddleware=(ctx:Context)=>Promise<Reply|void>|Reply|void;
@@ -115,8 +115,12 @@ export function requireAuth():RouterMiddleware{
     if(!ctx.bearer)return error('Sign in to continue',401);
     const {data:{user},error:problem}=await service().auth.getUser(ctx.bearer);
     if(problem||!user||!user.email)return error('Invalid or expired session',401);
+    const selectedRole=user.user_metadata?.classpulse_role;
     ctx.user={userId:user.id,email:user.email,
-      name:String(user.user_metadata?.full_name||user.user_metadata?.name||'')};
+      name:String(user.user_metadata?.full_name||user.user_metadata?.name||''),
+      signupRole:selectedRole==='Faculty'||selectedRole==='Student'?selectedRole:undefined,
+      studentNumber:typeof user.user_metadata?.classpulse_campus_id==='string'
+        ?user.user_metadata.classpulse_campus_id.slice(0,40):''};
   };
 }
 export function router(routes:Record<string,RouterMiddleware[]>){

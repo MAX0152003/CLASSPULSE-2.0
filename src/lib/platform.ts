@@ -45,7 +45,7 @@ export const auth={
     if(error||!user)return null;
     return {userId:user.id,email:user.email,name:user.user_metadata?.full_name||user.user_metadata?.name};
   },
-  async signUpWithPassword(values:{email:string;password:string;name:string}){
+  async signUpWithPassword(values:{email:string;password:string;name:string;studentNumber:string;role:'Student'|'Faculty'}){
     const email=values.email.trim().toLowerCase();
     if(!validEmail(email))throw Error('Enter a valid email address.');
     if(values.password.length<8)throw Error('Use a password with at least 8 characters.');
@@ -53,7 +53,7 @@ export const auth={
       email,password:values.password,
       options:{
         emailRedirectTo:authCallbackUrl('confirmed'),
-        data:{full_name:values.name.trim()},
+        data:{full_name:values.name.trim(),classpulse_role:values.role,classpulse_campus_id:values.studentNumber.trim().slice(0,40)},
       },
     });
     if(error)throw error;
@@ -174,13 +174,43 @@ export const api={
   put:(path:string,body?:unknown)=>apiRequest('PUT',path,body),
 };
 
-/** In-app notifications remain persisted in the ClassPulse database.
- * Web Push requires a separate service worker and VAPID configuration.
+/** Opt-in Web Push: the user must explicitly enable alerts from Settings.
+ * iOS 16.4+ supports push only from installed Home Screen web apps.
  */
 export const notifications={
   async subscribe(){
-    if(!('Notification' in window))throw Error('Notifications are unavailable in this browser.');
-    throw Error('Web push has not been configured. In-app academic notifications still work.');
+    if(!('Notification' in window)||!('serviceWorker' in navigator)||
+       !('PushManager' in window)||!window.isSecureContext){
+      throw Error('This browser cannot receive background push alerts. Open ClassPulse as an installed HTTPS web app on a supported device.');
+    }
+    // Request permission as the first asynchronous operation after the user's click.
+    const permission=await Notification.requestPermission();
+    if(permission!=='granted')throw Error('Notifications are blocked. Allow ClassPulse alerts in your device or browser settings.');
+    const {data}=await api.get('/api/push/config');
+    const cfg=data as {enabled:boolean;publicKey:string};
+    if(!cfg.enabled||!cfg.publicKey)throw Error('Background notifications are unavailable for this account or deployment.');
+    const serviceWorker=await navigator.serviceWorker.register('/sw.js',{scope:'/'});
+    const registration=await navigator.serviceWorker.ready;
+    if(!serviceWorker||!registration)throw Error('Unable to initialize notification service worker.');
+    const key=cfg.publicKey.replace(/-/g,'+').replace(/_/g,'/');
+    const decoded=atob(key.padEnd(Math.ceil(key.length/4)*4,'='));
+    const bytes=Uint8Array.from(decoded,c=>c.charCodeAt(0));
+    let subscription=await registration.pushManager.getSubscription();
+    if(!subscription){
+      subscription=await registration.pushManager.subscribe({
+        userVisibleOnly:true,applicationServerKey:bytes
+      });
+    }
+    await api.post('/api/push/subscribe',{subscription:subscription.toJSON()});
+    return 'Background class alerts enabled on this device.';
+  },
+  async unsubscribe(){
+    if(!('serviceWorker' in navigator))return;
+    const registration=await navigator.serviceWorker.getRegistration('/');
+    const subscription=await registration?.pushManager.getSubscription();
+    if(!subscription)return;
+    try{await api.post('/api/push/unsubscribe',{endpoint:subscription.endpoint});}
+    finally{await subscription.unsubscribe();}
   }
 };
 

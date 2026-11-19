@@ -1,6 +1,7 @@
 import { router, json, error, requireAuth, db, storage, notifications, ws } from './vercel-sdk.js';
 import type { RouterMiddleware } from './vercel-sdk.js';
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import webpush from 'web-push';
 
 type Role = 'Student' | 'Faculty' | 'System Administrator';
 type Profile = {
@@ -87,6 +88,37 @@ const ADMIN_EMAILS = [...new Set(
 type AdminInvite={id:string;email:string;status:'PENDING'|'ACCEPTED'|'REVOKED';createdBy:string;createdAt:string;expiresAt:string;acceptedAt?:string;previousRole?:Role};
 type UserInvite={id:string;email:string;role:'Student'|'Faculty';status:'PENDING'|'ACCEPTED'|'REVOKED';createdBy:string;createdAt:string;expiresAt:string;acceptedAt?:string};
 type SystemIssue={id:string;kind:'crash'|'network'|'sync'|'account'|'other';severity:'LOW'|'MEDIUM'|'HIGH';message:string;reporterId:string;createdAt:string;status:'OPEN'|'RESOLVED';resolvedAt?:string};
+type BrowserPushRecord={id:string;userId:string;subscription:{
+  endpoint:string;expirationTime?:number|null;keys:{p256dh:string;auth:string}};
+  createdAt:string;updatedAt:string};
+const pushRecordId=(userId:string,endpoint:string)=>
+  'push-'+createHash('sha256').update(userId+':'+endpoint).digest('hex').slice(0,40);
+function configureWebPush(){
+  const publicKey=(process.env.CLASSPULSE_VAPID_PUBLIC_KEY||'').trim();
+  const privateKey=(process.env.CLASSPULSE_VAPID_PRIVATE_KEY||'').trim();
+  const subject=(process.env.CLASSPULSE_VAPID_SUBJECT||'').trim();
+  if(!publicKey||!privateKey||!subject)return false;
+  webpush.setVapidDetails(subject,publicKey,privateKey);
+  return true;
+}
+async function sendBrowserPush(userId:string,title:string,body:string,kind:string){
+  if(!configureWebPush())return;
+  const records=(await list<BrowserPushRecord>('cp_push_subscriptions',500))
+    .filter(s=>s.userId===userId).slice(0,6);
+  const payload=JSON.stringify({title,body,kind,url:'/?view=Notifications'});
+  await Promise.allSettled(records.map(async(record)=>{
+    try{
+      await webpush.sendNotification(record.subscription,payload,
+        {TTL:kind==='class'?86400:14400,urgency:kind==='class'?'high':'normal'});
+    }catch(e){
+      const status=Number((e as {statusCode?:number})?.statusCode);
+      if(status===404||status===410){
+        try{await db.tx.delete('cp_push_subscriptions',[record.id]);}catch{}
+      }
+    }
+  }));
+}
+
 const userInviteId=(email:string)=>'ui-'+createHash('sha256').update(email.trim().toLowerCase()).digest('hex').slice(0,42);
 function adminInviteId(email:string){return 'ai-'+createHash('sha256').update(email.toLowerCase()).digest('hex').slice(0,42);}
 async function isAdminEmail(email?:string) {
@@ -251,9 +283,9 @@ async function audit(actorId: string, actionType: string, targetType: string, ta
 async function notify(userId: string, title: string, body: string, kind: string) {
   await db.add(noticesTable(userId), [{ title, body, kind, createdAt: nowIso(), read: false }]);
   try {
-    await notifications.send({ userIds: [userId], notification: { title, body, url: '/' }, data: { kind } });
+    await sendBrowserPush(userId,title,body,kind);
   } catch {
-    // Persisted in-app notice remains available if a device has no push subscription.
+    // Persisted in-app notice is still available when push delivery is unavailable.
   }
 }
 async function sectionMembers(sectionId: string) {
@@ -342,7 +374,25 @@ export const handler = router({
   'GET /api/bootstrap': [requireAuth(), async (ctx) => {
     const existing=await get<Profile>('cp_profiles',ctx.user!.userId);
     if(existing?.deletedAt)return json({profile:existing,accountDeleted:true,adminConfigured:ADMIN_EMAILS.length>0});
-    const p = await me(ctx.user!);
+    let p=await me(ctx.user!);
+    // The Student/Faculty selection was made at account creation and carried
+    // in verified Supabase Auth user metadata. Never make users select it again.
+    const savedRole=ctx.user!.signupRole;
+    if(!p.onboardingComplete&&p.role!=='System Administrator'&&savedRole){
+      const registeredName=(ctx.user!.name||'').trim();
+      if(registeredName.length>=2){
+        await patch('cp_profiles',p.userId,{
+          name:registeredName.slice(0,90),
+          studentNumber:(ctx.user!.studentNumber||'').slice(0,40),
+          role:savedRole,roleRequest:'',onboardingComplete:true,
+        });
+        await audit(p.userId,'COMPLETE_REGISTRATION_'+savedRole.toUpperCase(),
+          'Profile',p.userId,'system');
+        p={...p,name:registeredName.slice(0,90),
+          studentNumber:(ctx.user!.studentNumber||'').slice(0,40),
+          role:savedRole,roleRequest:'',onboardingComplete:true};
+      }
+    }
     return json({
       profile: p,
       adminConfigured: ADMIN_EMAILS.length > 0,
@@ -354,7 +404,7 @@ export const handler = router({
     const body = input(ctx.body);
     const name = text(body.name, 90);
     const studentNumber = text(body.studentNumber, 40);
-    const requestedRole = text(body.requestedRole, 36);
+    const requestedRole=ctx.user!.signupRole||text(body.requestedRole,36);
     if (name.length < 2) return error('Enter your full name to complete registration', 400);
     if (!['Student','Faculty'].includes(requestedRole) &&
       !(requestedRole==='System Administrator'&&p.role==='System Administrator')){
@@ -860,8 +910,14 @@ export const handler = router({
     const update = { sectionId: s.id, facultyId: p.userId, type: status, message: text(body.message, 300), room, publishedAt: nowIso() };
     await db.add('cp_updates', [update]);
     await audit(p.userId, 'CLASS_STATUS_UPDATED', 'CourseSection', s.id);
-    for (const student of await sectionMembers(s.id)) {
-      await notify(student.studentId, s.courseCode + ' · ' + status, update.message || 'Class status or room has changed.', 'class');
+    const members=await sectionMembers(s.id);
+    const announcement=update.message || (status==='ROOM CHANGED'
+      ?'Please check the updated room: '+room : 'Class status has changed.');
+    // Notify in small parallel batches to reduce delivery delay without
+    // flooding Supabase or claiming a guaranteed push-delivery time.
+    for(let offset=0;offset<members.length;offset+=12){
+      await Promise.allSettled(members.slice(offset,offset+12).map(student=>
+        notify(student.studentId,s.courseCode+' · '+status,announcement,'class')));
     }
     await publishFacultyLive(p.userId,{kind:'class',updatedAt:nowIso()});
     return json({ ok: true });
@@ -932,8 +988,19 @@ export const handler = router({
     if (Date.now() < start - 30 * 60000 || Date.now() > end + 30 * 60000) {
       return error('This QR session opens within 30 minutes of the scheduled class time.', 409);
     }
-    const old = (await list<Meeting>('cp_sessions')).find((m) => m.sectionId === sectionId && m.meetingDate === date);
-    if (old) return error('A QR-enabled session already exists for this class today', 409);
+    // One meeting can be displayed repeatedly; reopening a closed meeting keeps
+    // its original attendance IDs, avoiding duplicate daily absence records.
+    const old = (await list<Meeting>('cp_sessions')).find((m)=>
+      m.sectionId===sectionId&&m.meetingDate===date);
+    if(old){
+      if(old.status==='CLOSED'){
+        const reopened=await patch('cp_sessions',old.id,{status:'OPEN'},{status:'CLOSED'});
+        if(!reopened)return error('Session changed. Refresh and retry.',409);
+        await audit(p.userId,'REOPEN_QR_SESSION','ClassSession',old.id);
+      }
+      await publishFacultyLive(p.userId,{kind:'session',updatedAt:nowIso()});
+      return json({ok:true,reused:true,meeting:publicMeeting({...old,status:'OPEN'})});
+    }
     const meeting = await openSession(section, date);
     if (!(await add('cp_sessions', meeting))) return error('Unable to create session', 500);
     await audit(p.userId, 'OPEN_QR_SESSION', 'ClassSession', meeting.id);
@@ -1066,25 +1133,37 @@ export const handler = router({
     const detail = await sessionAccess(p, sessionId);
     if (!detail || !detail.faculty) return forbid();
     const id = attendanceId(studentId, sessionId);
+    const enrolled=await get('cp_enrollments',memberId(studentId,detail.section.id));
+    if(!enrolled)return forbid('Only students enrolled in your subject can receive manual attendance');
+    const student=await get<Profile>('cp_profiles',studentId);
+    if(!student||student.deletedAt||student.role!=='Student')return forbid('Inactive or invalid student');
     const before = await get<Attendance>('cp_attendance', id);
-    if (!before) return error('Attendance record does not exist', 404);
-    const verified = status !== 'ABSENT' && before.verificationStatus === 'PENDING_REVIEW' ? 'FACULTY_APPROVED' : 'FACULTY_CORRECTED';
+    const verified = before&&status !== 'ABSENT'&&before.verificationStatus==='PENDING_REVIEW'
+      ?'FACULTY_APPROVED':'FACULTY_CORRECTED';
     const changedAt=nowIso();
     const correction:AttendanceCorrection={
       id:randomUUID(),sectionId:detail.section.id,attendanceId:id,sessionId,studentId,
-      facultyId:p.userId,previousStatus:before.academicStatus,nextStatus:status,reason,timestamp:changedAt,
+      facultyId:p.userId,previousStatus:before?.academicStatus||'UNRECORDED',nextStatus:status,
+      reason,timestamp:changedAt,
     };
+    const operation=before
+      ?db.tx.update('cp_attendance',[{id,record:{
+        academicStatus:status,verificationStatus:verified,reviewReason:reason,updatedAt:changedAt,
+      },if:{updatedAt:before.updatedAt}}],{patch:true})
+      :db.tx.add('cp_attendance',[{
+        id,sessionId,sectionId:detail.section.id,studentId,
+        academicStatus:status,verificationStatus:'FACULTY_CORRECTED',
+        capturedAt:'',receivedAt:changedAt,clientScanId:'',
+        reviewReason:reason,updatedAt:changedAt,
+      }]);
     try{
-      await db.transact([
-        db.tx.update('cp_attendance',[{id,record:{
-          academicStatus:status,verificationStatus:verified,reviewReason:reason,updatedAt:changedAt,
-        },if:{updatedAt:before.updatedAt}}],{patch:true}),
-        db.tx.add('cp_attendance_corrections',[correction]),
-      ]);
-    }catch{return error('Attendance changed while you were reviewing it. Refresh and retry.',409);}
-    await audit(p.userId, 'REVIEW_ATTENDANCE_' + before.academicStatus + '_TO_' + status, 'AttendanceRecord', id);
-    await notify(studentId, 'Attendance record reviewed', detail.section.courseCode + ': ' + status + '. Reason: ' + reason, 'attendance');
-    return json({ ok: true });
+      await db.transact([operation,db.tx.add('cp_attendance_corrections',[correction])]);
+    }catch{return error('Attendance changed while you were editing. Refresh and retry.',409);}
+    await audit(p.userId,(before?'REVIEW_ATTENDANCE_':'MANUAL_ATTENDANCE_')+
+      (before?.academicStatus||'UNRECORDED')+'_TO_'+status,'AttendanceRecord',id);
+    await notify(studentId,'Attendance '+(before?'corrected':'recorded'),
+      detail.section.courseCode+': '+status+'. Reason: '+reason,'attendance');
+    return json({ok:true,manual:!before});
   }],
   'POST /api/sessions/:id/finalize': [requireAuth(), async (ctx) => {
     const p = await me(ctx.user!);
@@ -1371,6 +1450,44 @@ export const handler = router({
     await audit(p.userId, 'BOOKING_' + status, 'Booking', booking.id);
     await notify(booking.studentId, 'Consultation ' + status.toLowerCase(), slot.facultyName + ': ' + (decisionReason || 'Booking status updated.'), 'consultation');
     return json({ ok: true });
+  }],
+  'GET /api/push/config': [requireAuth(),async(ctx)=>{
+    const p=await me(ctx.user!);
+    return json({enabled:p.role==='Student'&&Boolean(
+      process.env.CLASSPULSE_VAPID_PUBLIC_KEY&&process.env.CLASSPULSE_VAPID_PRIVATE_KEY
+      &&process.env.CLASSPULSE_VAPID_SUBJECT),
+      publicKey:p.role==='Student'?(process.env.CLASSPULSE_VAPID_PUBLIC_KEY||''):''});
+  }],
+  'POST /api/push/subscribe': [requireAuth(),async(ctx)=>{
+    const p=await me(ctx.user!);
+    if(p.role!=='Student'||p.deletedAt)return forbid('Only active student accounts can enable class alerts');
+    const payload=input(ctx.body);
+    const raw=payload.subscription as {endpoint?:unknown;keys?:{p256dh?:unknown;auth?:unknown};
+      expirationTime?:number|null}|undefined;
+    const endpoint=typeof raw?.endpoint==='string'?raw.endpoint:'';
+    const keys=raw?.keys;
+    const p256dh=typeof keys?.p256dh==='string'?keys.p256dh:'';
+    const auth=typeof keys?.auth==='string'?keys.auth:'';
+    if(!endpoint.startsWith('https://')||endpoint.length>1800||
+      p256dh.length<30||p256dh.length>240||auth.length<10||auth.length>180){
+      return error('Invalid browser push subscription',400);
+    }
+    if(!configureWebPush())return error('Web push is not configured on this deployment',503);
+    const subscription={endpoint,keys:{p256dh,auth},
+      expirationTime:typeof raw?.expirationTime==='number'?raw.expirationTime:null};
+    const id=pushRecordId(p.userId,endpoint);
+    const existing=await get<BrowserPushRecord>('cp_push_subscriptions',id);
+    if(existing)await patch('cp_push_subscriptions',id,{subscription,updatedAt:nowIso()});
+    else await add('cp_push_subscriptions',{id,userId:p.userId,subscription,
+      createdAt:nowIso(),updatedAt:nowIso()});
+    return json({ok:true});
+  }],
+  'POST /api/push/unsubscribe': [requireAuth(),async(ctx)=>{
+    const p=await me(ctx.user!);
+    const endpoint=text(input(ctx.body).endpoint,1800);
+    if(!endpoint.startsWith('https://'))return error('Invalid subscription',400);
+    await db.tx.delete('cp_push_subscriptions',[pushRecordId(p.userId,endpoint)]);
+    return json({ok:true});
   }],
   'GET /api/notices': [requireAuth(), async (ctx) => {
     const p = await me(ctx.user!);

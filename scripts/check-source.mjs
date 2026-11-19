@@ -35,6 +35,31 @@ const vercelConfig=JSON.parse(read('vercel.json'));
 const databaseSql=read('supabase/schema.sql');
 const cases={
   'No AppDeploy runtime imports in frontend':!app.includes("from '@appdeploy/client'"),
+  'New signup keeps Student or Faculty selection in Supabase Auth metadata':
+    platform.includes('classpulse_role:values.role') &&
+    adapter.includes('signupRole:selectedRole') &&
+    api.includes('const savedRole=ctx.user!.signupRole') &&
+    app.includes('signupRoleLocked'),
+  'Repeated Faculty QR reuses the same meeting and preserves attendance':
+    api.includes("REOPEN_QR_SESSION") &&
+    api.includes("return json({ok:true,reused:true,meeting:publicMeeting") &&
+    !api.includes('A QR-enabled session already exists for this class today'),
+  'Faculty can manually record and correct enrolled student attendance with audit':
+    api.includes("previousStatus:before?.academicStatus||'UNRECORDED'") &&
+    api.includes("db.tx.add('cp_attendance',[{") &&
+    api.includes("get('cp_enrollments',memberId(studentId,detail.section.id))") &&
+    app.includes('cp-roster-manual-toolbar') &&
+    app.includes('Set attendance'),
+  'Class notices persist, show foreground alerts and support consent-based Push':
+    api.includes('sendBrowserPush(userId,title,body,kind)') &&
+    api.includes("'POST /api/push/subscribe'") &&
+    api.includes("'POST /api/push/unsubscribe'") &&
+    app.includes('cp-class-alert-backdrop') &&
+    app.includes("window.setInterval(()=>{void check();},6000)") &&
+    fs.existsSync(path.join(root,'public/sw.js')),
+  'Desktop sidebar logout remains reachable on narrow Windows viewports':
+    css.includes('.cp-sidebar .cp-sidebar-bottom>button{display:flex!important') &&
+    css.includes('.cp-sidebar .cp-side-links{min-height:0;min-width:0;flex:1 1 auto;'),
   'Swipe left opens navigation without hijacking the schedule deck':
     app.includes("if(!drawer&&dx<0)setDrawer(true)")&&
     app.includes("cp-deck-stage,.cp-deck-days")&&

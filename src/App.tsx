@@ -1069,6 +1069,8 @@ export default function App() {
   const [slots, setSlots] = useState<Slot[]>([]);
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [notices, setNotices] = useState<Notice[]>([]);
+  const [priorityNotice,setPriorityNotice]=useState<Notice|null>(null);
+  const seenPriorityNoticesRef=useRef<Set<string>>(new Set());
   const [users, setUsers] = useState<UserDirectory[]>([]);
   const [accountQuery, setAccountQuery] = useState('');
   const [importKind,setImportKind]=useState<ImportKind>('rooms');
@@ -1093,6 +1095,7 @@ export default function App() {
   const [recordFrom,setRecordFrom] = useState('');
   const [recordUntil,setRecordUntil] = useState('');
   const [expandedStudent, setExpandedStudent] = useState<string | null>(null);
+  const [manualSessionId,setManualSessionId]=useState('');
   const [selectedSubjectId, setSelectedSubjectId] = useState('');
   const [expandedSubjectId,setExpandedSubjectId] = useState<string|null>(null);
   const [busy, setBusy] = useState('');
@@ -1143,6 +1146,9 @@ export default function App() {
       ? old.filter(d => d !== date)
       : old.length >= 14 ? old : [...old,date].sort());
   };
+  const chosenDuringSignup=readSignupDraft();
+  const signupRoleLocked=Boolean(chosenDuringSignup&&
+    chosenDuringSignup.email.toLowerCase()===authUser?.email?.toLowerCase());
   const role = profile?.role || 'Student';
   const isFaculty = role === 'Faculty';
   const isStudent = role === 'Student';
@@ -1304,7 +1310,11 @@ export default function App() {
     if(openRecordsPage){setModal('');navigate('Student Records');}
     try {
       const response=await api.get('/api/faculty/sections/'+sectionId+'/roster');
-      setFacultyRoster(response.data as FacultyRoster);
+      const result=response.data as FacultyRoster;
+      setFacultyRoster(result);
+      const ordered=[...result.meetings].sort((x,y)=>y.openedAt.localeCompare(x.openedAt));
+      setManualSessionId(previous=>result.meetings.some(m=>m.id===previous)
+        ?previous:ordered[0]?.id||'');
     } catch(e) {
       showMessage('Unable to load your class records. '+apiMessage(e));
     } finally {
@@ -1450,7 +1460,8 @@ export default function App() {
         setEntryMode('signin');
         setAuthNotice('If your email was confirmed, sign in using your email and password. Otherwise request a new confirmation link.');
       }
-      if(authMode||linkError){
+      if(authMode||linkError||query.has('view')){
+        if(query.get('view')==='Notifications'&&user)setPage('Notifications');
         window.history.replaceState({},'',window.location.pathname);
       }
       if(mounted)setInitialized(true);
@@ -1470,6 +1481,44 @@ export default function App() {
     },30000);
     return ()=>window.clearInterval(interval);
   },[authUser?.userId,profile?.onboardingComplete,profile?.deletedAt]);
+  // Foreground alerts work without OS permission; background push uses a service
+  // worker and requires explicit consent from the Student's own device.
+  useEffect(()=>{
+    if(!authUser?.userId||profile?.role!=='Student'||!profile.onboardingComplete)return;
+    let alive=true,running=false;
+    const key='cp-seen-class-alerts-'+authUser.userId;
+    try{
+      const previous=JSON.parse(sessionStorage.getItem(key)||'[]') as string[];
+      seenPriorityNoticesRef.current=new Set(previous.slice(-100));
+    }catch{seenPriorityNoticesRef.current=new Set();}
+    const check=async()=>{
+      if(running||document.visibilityState==='hidden')return;
+      running=true;
+      try{
+        const {data}=await api.get('/api/notices');
+        if(!alive)return;
+        const items=(data as {notices:Notice[]}).notices||[];
+        setNotices(items);
+        const freshest=items.find(item=>item.kind==='class'&&!item.read
+          &&!seenPriorityNoticesRef.current.has(item.id)
+          &&Date.now()-Date.parse(item.createdAt)<24*60*60*1000);
+        if(freshest){
+          seenPriorityNoticesRef.current.add(freshest.id);
+          try{sessionStorage.setItem(key,JSON.stringify(
+            [...seenPriorityNoticesRef.current].slice(-100)));}catch{}
+          setPriorityNotice(previous=>previous||freshest);
+        }
+      }catch{/* Retry when connectivity returns. Persisted notifications remain available. */}
+      finally{running=false;}
+    };
+    void check();
+    const interval=window.setInterval(()=>{void check();},6000);
+    const onVisibility=()=>{void check();};
+    document.addEventListener('visibilitychange',onVisibility);
+    return()=>{alive=false;window.clearInterval(interval);
+      document.removeEventListener('visibilitychange',onVisibility);};
+  },[authUser?.userId,profile?.role,profile?.onboardingComplete]);
+
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem('cp-live-theme', theme);
@@ -1808,6 +1857,7 @@ export default function App() {
         setSignupDraft(details);
         const outcome=await auth.signUpWithPassword({
           name:details.name,email:details.email,password:signupPassword,
+          studentNumber:details.studentNumber,role:details.requestedRole as 'Student'|'Faculty',
         });
         setSignupPassword('');setConfirmPassword('');
         setPendingEmail(details.email);
@@ -1902,7 +1952,7 @@ export default function App() {
     finally{setAuthRedirecting(false);}
   }
   async function completeRegistration() {
-    if(profile?.role!=='System Administrator'&&!roleChoiceConfirmed){
+    if(profile?.role!=='System Administrator'&&!roleChoiceConfirmed&&!signupRoleLocked){
       setAuthError('Select Student or Faculty to continue.');return;
     }
     if (form.name.trim().length < 2) { setAuthError('Enter your full name first.'); return; }
@@ -1923,6 +1973,8 @@ export default function App() {
   }
   async function signOut() {
     sessionStorage.removeItem('cp-entry-mode');
+    try{await notifications.unsubscribe();}catch{/* The user can change permissions in browser settings. */}
+    seenPriorityNoticesRef.current.clear();setPriorityNotice(null);
     setOutbox([]);setQueueProblem('');
     await auth.signOut();
     setLoginPassword('');setSignupPassword('');setConfirmPassword('');
@@ -1939,8 +1991,10 @@ export default function App() {
   }
   async function openMeeting(sectionId: string) {
     const { data: r } = await api.post('/api/sessions/open', { sectionId });
-    setCurrentSession((r as { meeting: Meeting }).meeting);
+    const result=r as {meeting:Meeting;reused?:boolean};
+    setCurrentSession(result.meeting);
     setModal('qr');
+    if(result.reused)showMessage('QR refreshed for the same class meeting. Previous attendance records are preserved.');
     await refreshDashboard();
   }
   async function qrModal(meeting: Meeting) { setCurrentSession(meeting); setModal('qr'); }
@@ -2322,7 +2376,7 @@ export default function App() {
     <div className='cp-reg-intro'><Brand light/>
       <span className='cp-eyebrow light'>YOUR CAMPUS PROFILE</span>
       <h1>{sessionStorage.getItem('cp-entry-mode') === 'signup' ? 'Create your ClassPulse profile.' : 'Finish setting up your workspace.'}</h1>
-      <p>Verify your identity, complete your details, and open the Student or Faculty workspace immediately.</p>
+      <p>Your Student or Faculty role is selected when creating the account. Complete any remaining profile details only once.</p>
       <div className='cp-reg-steps'><span className='done'><Check size={15}/> Identity verified</span><span className='active'>2. Campus details</span><span>3. Access your workspace</span></div>
       <div className='cp-reg-note'><ShieldCheck size={20}/> Faculty workspaces activate after registration. Classroom ownership remains assigned by the institution. Administrator access is restricted to authorized emails.</div>
     </div>
@@ -2332,9 +2386,13 @@ export default function App() {
       <Field label='Full name' name='name' form={form} update={update} placeholder='Enter your first and last name' required/>
       <Field label='Campus / student / employee ID (optional)' name='studentNumber' form={form} update={update} placeholder='Your campus identifier'/>
       <div className='cp-reg-role-label'>{profile?.role==='System Administrator'
-        ? 'AUTHORIZED ADMINISTRATOR' : 'CHOOSE YOUR ROLE'}</div>
+        ? 'AUTHORIZED ADMINISTRATOR' : signupRoleLocked ? 'ROLE ALREADY SELECTED' : 'CHOOSE YOUR ROLE'}</div>
       {profile?.role==='System Administrator'
         ? <div className='cp-reg-admin-approved'><ShieldCheck size={20}/> Administrator access verified</div>
+        : signupRoleLocked
+          ? <div className='cp-reg-admin-approved'><CheckCircle2 size={20}/>
+              <strong>{form.requestedRole}</strong> · Selected during account creation
+            </div>
         : <div className='cp-reg-roles'>
         {[
           { name: 'Student', icon: GraduationCap, desc: 'Classes and attendance' },
@@ -2355,7 +2413,7 @@ export default function App() {
           Faculty QR and records require assigned classes.</p>}
       {(authError || message) && <p className='cp-auth-error' role='alert'>{authError || message}</p>}
       <button disabled={!!busy || form.name.trim().length < 2 ||
-        (profile?.role!=='System Administrator'&&!roleChoiceConfirmed)}
+        (profile?.role!=='System Administrator'&&!roleChoiceConfirmed&&!signupRoleLocked)}
         className='cp-button dark full cp-reg-submit' onClick={() => safeRun('registration', completeRegistration)}>Complete registration <ArrowRight size={18}/></button>
       <button className='cp-reg-switch' onClick={() => safeRun('sign-out', signOut)}>Use a different account</button>
     </section>
@@ -2778,6 +2836,19 @@ export default function App() {
                 <button className='cp-mini-btn' disabled={!!busy}
                   onClick={()=>{void loadFacultyRoster(facultyRoster.section.id,false);}}>
                   <RefreshCcw size={15}/> Refresh</button></div>
+              <div className='cp-roster-manual-toolbar'>
+                <div><FileCheck2 size={19}/><span><strong>Manual attendance</strong>
+                  <small>Select a class session, expand any student, and record Present, Late, Absent or Excused. Every change is audited.</small></span></div>
+                <label><span>Class meeting</span>
+                  <select value={manualSessionId} onChange={event=>setManualSessionId(event.target.value)}>
+                    <option value=''>Select a QR meeting</option>
+                    {[...facultyRoster.meetings].sort((x,y)=>y.openedAt.localeCompare(x.openedAt)).map(m=>
+                      <option key={m.id} value={m.id}>{m.meetingDate} · {m.status}</option>)}
+                  </select>
+                </label>
+              </div>
+              {!facultyRoster.meetings.length&&
+                <p className='cp-chart-note'>Open a Faculty QR session first. Attendance cannot be recorded for a class with no meeting.</p>}
               {facultyRoster.students.filter(s=>[s.name,s.studentNumber].join(' ').toLowerCase()
                 .includes(rosterSearch.trim().toLowerCase())).map(student=>{
                   const records=facultyRoster.records.filter(r=>{
@@ -2802,6 +2873,20 @@ export default function App() {
                       <ChevronRight size={18} className={open?'rotated':''}/>
                     </button>
                     {open&&<div className='cp-record-history'>
+                      <div className='cp-roster-edit-actions'>
+                        <span>Record attendance for the selected class meeting</span>
+                        <button type='button' className='cp-mini-btn primary'
+                          disabled={!manualSessionId||!!busy}
+                          onClick={()=>{
+                            const existing=facultyRoster.records.find(r=>
+                              r.studentId===student.studentId&&r.sessionId===manualSessionId);
+                            setForm(old=>({...old,studentId:student.studentId,
+                              sessionId:manualSessionId,
+                              status:existing&&['PRESENT','LATE','ABSENT','EXCUSED'].includes(existing.academicStatus)
+                                ?existing.academicStatus:'PRESENT',reason:''}));
+                            setModal('review');
+                          }}><FileCheck2 size={15}/> Set attendance</button>
+                      </div>
                       {records.length?records.map(r=><div className='cp-record-event' key={r.id}>
                         <div><strong>{dateFmt(r.capturedAt||r.receivedAt)}</strong>
                           <small>{r.verificationStatus.replace(/_/g,' ')} · {r.reviewReason||'QR attendance'}</small></div>
@@ -3236,11 +3321,17 @@ export default function App() {
                     <strong>Export schedule <ArrowUpRight size={14}/></strong>
                   </button>}
                   {!isAdmin && <p className='cp-settings-helper'>Calendar export includes a 15-minute alert. For reliable Android system alarms, import the .ics into the separate native companion app. Web notifications depend on browser/device support.</p>}
-                  {!isAdmin&&<button onClick={()=>safeRun('notify',async()=>{
-                    await notifications.subscribe();showMessage('Notification setup requested.');
+                  {isStudent&&<button onClick={()=>safeRun('notify',async()=>{
+                    const result=await notifications.subscribe();
+                    showMessage(result);
                   })}>
-                    <span><Bell size={18}/> Academic notifications</span>
-                    <strong>Enable <ArrowUpRight size={14}/></strong></button>}
+                    <span><Bell size={18}/> Phone and home-screen class alerts</span>
+                    <strong>{typeof Notification!=='undefined'&&Notification.permission==='granted'?'Manage':'Enable'} <ArrowUpRight size={14}/></strong></button>}
+                  {isStudent&&<p className='cp-settings-helper'>
+                    Class updates appear in-app while ClassPulse is open. For alerts on your phone's home screen,
+                    install ClassPulse as a Home Screen app, then tap Enable and allow notifications.
+                    iOS requires iOS 16.4 or newer and a Home Screen installation; browser and battery settings affect delivery.
+                  </p>}
                   <button type='button' onClick={()=>{
                     setForm(old=>({...old,issueKind:'other',issueMessage:''}));
                     setModal('report-issue');
@@ -3578,10 +3669,14 @@ export default function App() {
             The camera recognizes the signed QR and records attendance automatically. Offline scans are saved for later server verification and faculty review.</p></div>
         </div>
       </>}
-      {modal === 'qr' && currentSession && <><div className='cp-qr-paper'>{qrToken ? <QRCodeSVG value={qrToken} size={244} level='M'/> : <div className='cp-spinner'/>}</div><div className='cp-qr-timer'><span className='cp-live-dot'/> Signed QR rotates every 15 seconds · refresh in {15 - (Math.floor(tick % 15))}s</div><p className='cp-modal-help'>Only scanned, enrolled students can create attendance records. No QR session exists unless faculty explicitly opens one.</p><div className='cp-inline-actions'><button className='cp-mini-btn' onClick={() => safeRun('roster', async () => rosterModal(currentSession))}>Open roster</button><button className='cp-mini-btn danger' onClick={() => safeRun('close', async () => { await api.post('/api/sessions/' + currentSession.id + '/close', {}); setModal(''); await refreshDashboard(); showMessage('Attendance session closed.'); })}>Close session</button></div></>}
-      {modal === 'roster' && currentSession && <><div className='cp-roster'>{roster.map((student) => <div key={student.studentId} className='cp-roster-row'>{student.photo ? <img src={student.photo} alt='Verified profile reference'/> : <span className='cp-student-placeholder'><Users size={18}/></span>}<div><strong>{student.name}</strong><small>{student.studentNumber || student.studentId.slice(0,8)}</small></div><Pill color={colorFor(student.attendance?.academicStatus || '')}>{student.attendance?.academicStatus || 'NO SCAN'}</Pill>{student.attendance && <button className='cp-mini-btn' onClick={() => { update('studentId', student.studentId); update('sessionId', currentSession.id); update('status', student.attendance?.academicStatus || 'ABSENT'); setModal('review'); }}>Review</button>}</div>)}</div><button className='cp-mini-btn' onClick={() => safeRun('finalize', async () => { const r = await api.post('/api/sessions/' + currentSession.id + '/finalize', {}); showMessage((r.data as { ready: boolean }).ready ? 'Eligible missing attendance records finalized.' : 'The 12-hour post-class window has not elapsed.'); await rosterModal(currentSession); })}>Finalize absence after 12-hour window</button></>}
+      {modal === 'qr' && currentSession && <><div className='cp-qr-paper'>{qrToken ? <QRCodeSVG value={qrToken} size={244} level='M'/> : <div className='cp-spinner'/>}</div><div className='cp-qr-timer'><span className='cp-live-dot'/> Signed QR rotates every 15 seconds · refresh in {15 - (Math.floor(tick % 15))}s</div><p className='cp-modal-help'>You can reopen this QR for the same class meeting at any time within the scheduled window. A new student's valid scan also enrolls them, pending Faculty photo verification.</p><div className='cp-inline-actions'><button className='cp-mini-btn' onClick={() => safeRun('roster', async () => rosterModal(currentSession))}>Open roster</button><button className='cp-mini-btn danger' onClick={() => safeRun('close', async () => { await api.post('/api/sessions/' + currentSession.id + '/close', {}); setModal(''); await refreshDashboard(); showMessage('Attendance session closed.'); })}>Close session</button></div></>}
+      {modal === 'roster' && currentSession && <><div className='cp-roster'>{roster.map((student) => <div key={student.studentId} className='cp-roster-row'>{student.photo ? <img src={student.photo} alt='Verified profile reference'/> : <span className='cp-student-placeholder'><Users size={18}/></span>}<div><strong>{student.name}</strong><small>{student.studentNumber || student.studentId.slice(0,8)}</small></div><Pill color={colorFor(student.attendance?.academicStatus || '')}>{student.attendance?.academicStatus || 'NO SCAN'}</Pill><button className='cp-mini-btn' onClick={() => {
+  setForm(old=>({...old,studentId:student.studentId,sessionId:currentSession.id,
+    status:student.attendance&&['PRESENT','LATE','ABSENT','EXCUSED'].includes(student.attendance.academicStatus)
+      ?student.attendance.academicStatus:'PRESENT',reason:''}));
+  setModal('review');}}>{student.attendance?'Correct':'Mark'}</button></div>)}</div><button className='cp-mini-btn' onClick={() => safeRun('finalize', async () => { const r = await api.post('/api/sessions/' + currentSession.id + '/finalize', {}); showMessage((r.data as { ready: boolean }).ready ? 'Eligible missing attendance records finalized.' : 'The 12-hour post-class window has not elapsed.'); await rosterModal(currentSession); })}>Finalize absence after 12-hour window</button></>}
       {modal === 'review' && <>
-        <p className='cp-modal-help'>Corrections change the academic status, not the original QR scan evidence. A reason is required and saved in the audit trail.</p>
+        <p className='cp-modal-help'>Set Present, Late, Absent or Excused manually, or correct an existing QR record. A reason is required; original QR evidence is preserved and every change is audited.</p>
         <Field label='Corrected academic status' name='status' form={form} update={update}>
           {['PRESENT','LATE','ABSENT','EXCUSED'].map((s)=><option key={s}>{s}</option>)}
         </Field>
@@ -3596,7 +3691,7 @@ export default function App() {
             setModal('');
             if(selectedSubjectId)await loadFacultyRoster(selectedSubjectId,false);
             await refreshPage('Attendance');
-            showMessage('Correction saved with a complete audit entry.');
+            showMessage('Attendance saved with a complete Faculty audit entry.');
           })}><FileCheck2 size={17}/> Save audited correction</button>
       </>}
       {modal==='excuse'&&<>
@@ -3703,6 +3798,25 @@ export default function App() {
       {modal === 'booking-decision' && <><Field label='Decision note (optional)' name='reason' form={form} update={update}/><div className='cp-inline-actions'><button className='cp-button dark' onClick={() => safeRun('confirm', async () => { await action('/api/bookings/' + form.bookingId + '/decision', { status: 'CONFIRMED', reason: form.reason }, 'Consultations'); setModal(''); })}>Confirm booking</button><button className='cp-mini-btn danger' onClick={() => safeRun('reject-booking', async () => { await action('/api/bookings/' + form.bookingId + '/decision', { status: 'REJECTED', reason: form.reason }, 'Consultations'); setModal(''); })}>Reject</button></div></>}
       {busy && <div className='cp-modal-progress'><span className='cp-spinner small'/> Processing your request…</div>}
     </div></section></div>}
+    {priorityNotice && <div className='cp-class-alert-backdrop' role='presentation'>
+      <section className='cp-class-alert' role='alertdialog'
+        aria-label='Important class status update' aria-live='assertive'>
+        <div className='cp-class-alert-icon'><Bell size={27}/><i/><i/></div>
+        <span className='cp-class-alert-kicker'>CLASS STATUS ALERT</span>
+        <h2>{priorityNotice.title}</h2>
+        <p>{priorityNotice.body}</p>
+        <small>{dateFmt(priorityNotice.createdAt)} · Faculty announcement</small>
+        <div className='cp-class-alert-actions'>
+          <button className='cp-button dark' onClick={()=>safeRun('read-update',async()=>{
+            const current=priorityNotice;
+            setPriorityNotice(null);
+            await api.post('/api/notices/'+current.id+'/read',{});
+            navigate('Notifications');
+          })}>Open announcement <ArrowRight size={16}/></button>
+          <button className='cp-mini-btn' onClick={()=>setPriorityNotice(null)}>Dismiss</button>
+        </div>
+      </section>
+    </div>}
     {message && <div className='cp-toast'><span><Activity size={16}/></span>{message}<button onClick={() => setMessage('')}><X size={15}/></button></div>}
   </div>;
 }
