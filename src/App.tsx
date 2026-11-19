@@ -1015,7 +1015,7 @@ export default function App() {
       }
       startX = event.touches[0].clientX;
       startY = event.touches[0].clientY;
-      eligible = drawer || startX < Math.min(72, window.innerWidth * .18);
+      eligible = drawer || startX > window.innerWidth - Math.min(72, window.innerWidth * .18);
     };
     const onEnd = (event: TouchEvent) => {
       if (!eligible || !event.changedTouches.length) return;
@@ -1023,10 +1023,9 @@ export default function App() {
       const dx = event.changedTouches[0].clientX - startX;
       const dy = event.changedTouches[0].clientY - startY;
       if (Math.abs(dx) < 75 || Math.abs(dx) < Math.abs(dy) * 1.35) return;
-      // From the left screen edge, swipe right to reveal navigation;
-      // swipe left while the drawer is visible to dismiss it.
-      if (!drawer && dx > 0) setDrawer(true);
-      if (drawer && dx < 0) setDrawer(false);
+      // Swipe left from the right edge to reveal the menu; swipe right to close.
+      if (!drawer && dx < 0) setDrawer(true);
+      if (drawer && dx > 0) setDrawer(false);
     };
     document.addEventListener('touchstart', onStart, { passive: true });
     document.addEventListener('touchend', onEnd, { passive: true });
