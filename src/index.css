@@ -2478,3 +2478,30 @@ html[data-density='spacious'] .cp-panel label { font-size:max(17px, 1em); }
 @media (prefers-reduced-motion:reduce) {
   .cp-deck-card { transition:none!important; animation:none!important; }
 }
+
+
+/* ClassPulse 2.0: lightweight GPU-friendly depth and responsive polish */
+@media (prefers-reduced-motion: no-preference) and (hover: hover) and (pointer: fine) {
+  .cp-deck-card { will-change: transform; }
+  .cp-panel { transition: box-shadow .24s ease, border-color .24s ease; }
+  .cp-panel:hover { box-shadow: 0 12px 32px rgba(24,35,62,.09); }
+  .cp-deck-class { transition: transform .22s cubic-bezier(.2,.8,.2,1), box-shadow .22s ease; }
+  .cp-deck-class:hover { transform: translate3d(0,-3px,0); box-shadow:0 10px 22px rgba(22,31,55,.14); }
+  .cp-mini-btn, .cp-menu { transition: transform .18s ease, filter .18s ease; }
+  .cp-mini-btn:hover, .cp-menu:hover { transform: translateY(-1px); }
+}
+.cp-deck-card { transform-style: preserve-3d; backface-visibility: hidden; }
+.cp-deck-class:focus-visible, .cp-menu:focus-visible, .cp-mini-btn:focus-visible {
+  outline: 3px solid #4b83ef; outline-offset: 3px;
+}
+@media (max-width: 680px) {
+  .cp-week-panel { max-width:100%; min-width:0; }
+  .cp-deck-stage { width:100%; max-width:100%; }
+  .cp-deck-class { min-height:52px; }
+  .cp-record-roster { min-width:0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cp-panel, .cp-deck-class, .cp-mini-btn, .cp-menu {
+    transition:none!important; animation:none!important;
+  }
+}
