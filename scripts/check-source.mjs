@@ -12,6 +12,9 @@ const sourceFiles=[
   ['src/main.tsx',ts.ScriptKind.TSX],
   ['backend/index.ts',ts.ScriptKind.TS],
   ['vite.config.ts',ts.ScriptKind.TS],
+  ['src/lib/platform.ts',ts.ScriptKind.TS],
+  ['backend/vercel-sdk.ts',ts.ScriptKind.TS],
+  ['api/[...path].ts',ts.ScriptKind.TS],
 ];
 let failed=false;
 for(const [file,kind] of sourceFiles){
@@ -25,7 +28,22 @@ for(const [file,kind] of sourceFiles){
     }
   } else console.log('PASS parse '+file);
 }
+const platform=read('src/lib/platform.ts');
+const adapter=read('backend/vercel-sdk.ts');
+const apiFunction=read('api/[...path].ts');
+const databaseSql=read('supabase/schema.sql');
 const cases={
+  'No AppDeploy runtime imports in frontend':!app.includes("from '@appdeploy/client'"),
+  'No AppDeploy runtime imports in backend':!api.includes("from '@appdeploy/sdk'"),
+  'Vercel API route uses existing backend':apiFunction.includes("from '../backend/index'"),
+  'Supabase authenticated JWT checked server-side':adapter.includes('auth.getUser(ctx.bearer)'),
+  'Supabase records are private':databaseSql.includes('enable row level security'),
+  'Atomic transaction with per-record lock':databaseSql.includes('pg_advisory_xact_lock')&&databaseSql.includes('cp_apply_batch'),
+  'Server-only service key is not used in Vite client':!platform.includes('SUPABASE_SERVICE_ROLE_KEY'),
+  'Private signed storage URLs':adapter.includes('createSignedUrl(path,300)'),
+  'Email OTP and OAuth are real':platform.includes('signInWithOtp')&&platform.includes('signInWithOAuth'),
+  'Unavailable Web Push is disclosed':platform.includes('push-not-configured')||platform.includes('Web push has not been configured'),
+
  'Admin cannot create course sections':!api.includes("'POST /api/admin/section':"),
  'Admin cannot modify course sections':!api.includes("'POST /api/admin/section/:id/update':"),
  'Admin cannot rotate academic join codes':!api.includes("'POST /api/admin/section/:id/rotate-code':"),

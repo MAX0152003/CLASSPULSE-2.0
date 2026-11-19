@@ -376,7 +376,11 @@
       "Five-item floating navigation wraps labels into two lines without collisions",
       "Date range filters never overlap or horizontally scroll on 320–430 px iPhones",
       "Footer and availability controls are not covered by floating navigation",
-      "Weekly cards use compact no-class height and avoid redundant title/status"
+      "Weekly cards use compact no-class height and avoid redundant title/status",
+      "Supabase verified JWT and private Postgres service-role routes",
+      "Vercel API functions use transaction-safe QR and consultation records",
+      "Email OTP and OAuth provider selection without fake sign-in",
+      "Vercel unsupplied environment clearly blocks sign-in without pretending database connectivity"
     ],
     "description": "Checks that role selection never bypasses authorization and all roles use adaptive navigation.",
     "steps": [
@@ -397,7 +401,14 @@
       "Scroll to the very end of the Faculty Overview and Excuses screens; bottom availability actions, last letter and footer must remain fully reachable above the floating dock.",
       "Scroll Subjects until week title reaches the iOS status bar; toolbar stays visible below the device status indicators, and no headings disappear behind it.",
       "Swipe weekly class cards left/right and use weekday buttons with no classes; ensure day card is compact but all content visible, with no extra repeated day heading.",
-      "Rotate iPhone to landscape and verify fixed navigation is at the right edge with icon-only controls, while the one-column drawer scrolls vertically."
+      "Rotate iPhone to landscape and verify fixed navigation is at the right edge with icon-only controls, while the one-column drawer scrolls vertically.",
+      "Connect a Supabase test project, run schema.sql, set Vercel environment and verify /api/_healthcheck responds.",
+      "Without Supabase environment, verify sign-in says configuration is pending and does not create sample accounts.",
+      "Sign in with email OTP; unauthorized API calls must return 401. Confirm Google/Apple only after configuring providers.",
+      "Verify Student cannot access Faculty or Administrator routes and admin cannot edit academic sections.",
+      "Confirm that concurrent consultation booking approvals cannot oversubscribe; concurrent attendance review fails on stale status.",
+      "Verify private photo/letter signed URLs expire and cannot be accessed without authentication.",
+      "Check offline capturedAt validity inside 12-hour sync window and reject manipulated timestamps."
     ],
     "expected": "Privileges are enforced on the backend, and student-level attendance details are not accessible to Administrator users. The verified authorized email is elevated to Administrator while unauthorised emails remain non-admin. Administrator can edit approved class reference data, rotate join codes, and manage role approvals without seeing student-level attendance."
   }

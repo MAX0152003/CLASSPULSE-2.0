@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useRef, useState } from 'react';
-import { api, auth, notifications, ws } from '@appdeploy/client';
+import { api, auth, notifications, ws, backendConfigured } from './lib/platform';
 import { QRCodeSVG } from 'qrcode.react';
 import jsQR from 'jsqr';
 import {storeQueuedScan,listQueuedScans,removeQueuedScan,migrateOldScans,nextRetry} from './offlineQueue';
@@ -980,6 +980,9 @@ export default function App() {
   const [authError, setAuthError] = useState('');
   const [entryMode, setEntryMode] = useState<EntryMode | null>(null);
   const [authRedirecting, setAuthRedirecting] = useState(false);
+  const [loginEmail,setLoginEmail]=useState('');
+  const [loginProvider,setLoginProvider]=useState<'email'|'google'|'apple'>('email');
+  const [verificationSent,setVerificationSent]=useState(false);
   const [roleChoiceConfirmed,setRoleChoiceConfirmed]=useState(false);
   const [deleteConfirm,setDeleteConfirm]=useState('');
   const [excuseMonth,setExcuseMonth]=useState(()=>dateOnly().slice(0,7));
@@ -1322,6 +1325,15 @@ export default function App() {
     }).catch((e) => { if (mounted) { setAuthError(apiMessage(e)); setInitialized(true); } });
     return () => { mounted = false; };
   }, []);
+  useEffect(()=>{
+    if(!authUser?.userId||!profile?.onboardingComplete||profile.deletedAt)return;
+    const interval=window.setInterval(()=>{
+      if(document.visibilityState==='visible'){
+        void refreshLive().catch(()=>{});
+      }
+    },30000);
+    return ()=>window.clearInterval(interval);
+  },[authUser?.userId,profile?.onboardingComplete,profile?.deletedAt]);
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem('cp-live-theme', theme);
@@ -1630,6 +1642,7 @@ export default function App() {
   }
   function openEntry(mode: EntryMode) {
     setAuthError('');
+    setVerificationSent(false);
     setAuthRedirecting(false);
     setEntryMode(mode);
   }
@@ -1652,7 +1665,14 @@ export default function App() {
     }
     setAuthRedirecting(true);
     try {
-      await auth.signInWithRedirect();
+      const method=await auth.signInWithRedirect({
+        provider:loginProvider,
+        email:entryMode==='signup'?signupDraft.email:loginEmail,
+      });
+      if(method.emailSent){
+        setVerificationSent(true);
+        setAuthRedirecting(false);
+      }
     } catch (e) {
       setAuthRedirecting(false);
       const message = apiMessage(e);
@@ -1796,12 +1816,39 @@ export default function App() {
           <p className='cp-auth-role-note'><ShieldCheck size={16}/>
             You will confirm your role after Google, Apple or email verification.</p>
         </div>}
+        {entryMode==='signin'&&<label className='cp-field cp-auth-login-email'>
+          <span>Email for verification</span>
+          <input type='email' inputMode='email' autoComplete='email'
+            placeholder='student@university.edu' value={loginEmail}
+            onChange={event=>setLoginEmail(event.target.value)}/>
+        </label>}
+        <fieldset className='cp-auth-providers'>
+          <legend>Continue using</legend>
+          <div role='group' aria-label='Authentication provider'>
+            {([['email','Email link'],['google','Google'],['apple','Apple']] as const)
+              .map(([provider,label])=><button type='button' key={provider}
+                className={loginProvider===provider?'selected':''}
+                aria-pressed={loginProvider===provider}
+                onClick={()=>{setLoginProvider(provider);setVerificationSent(false);}}>
+                {label}</button>)}
+          </div>
+          {loginProvider!=='email'&&
+            <small>Google and Apple must be enabled in Supabase Authentication.</small>}
+        </fieldset>
+        {verificationSent&&<p className='cp-auth-success' role='status'>
+          Verification email sent. Open the link on this device to finish signing in.
+        </p>}
+        {!backendConfigured&&<p className='cp-auth-error' role='alert'>
+          ClassPulse is being configured for its new Vercel database and sign-in provider.
+          Account access is unavailable until Supabase is connected.
+        </p>}
         {authError && <div role='alert' className='cp-auth-error'>{authError}</div>}
-        <button disabled={authRedirecting} className='cp-button dark full cp-auth-submit' onClick={beginAuthentication}>
-          {authRedirecting ? 'Opening secure verification…' : entryMode === 'signup' ? 'Verify email & create account' : 'Continue to secure sign in'}
+        <button disabled={authRedirecting||!backendConfigured} className='cp-button dark full cp-auth-submit' onClick={beginAuthentication}>
+          {authRedirecting ? 'Starting secure sign-in…' : loginProvider==='email'
+            ? 'Send verification link' : 'Continue with '+(loginProvider==='google'?'Google':'Apple')}
           {authRedirecting ? <span className='cp-spinner small'/> : <ArrowRight size={17}/>}
         </button>
-        <p className='cp-auth-hint'><LockKeyhole size={17}/> Secure sign-in · No password to remember.</p>
+        <p className='cp-auth-hint'><LockKeyhole size={17}/> Secure email verification with Supabase Auth. No app-stored passwords.</p>
         <div className='cp-auth-switch'>
           {entryMode === 'signup' ? 'Already registered?' : 'New to ClassPulse?'}
           <button onClick={() => openEntry(entryMode === 'signup' ? 'signin' : 'signup')}>{entryMode === 'signup' ? 'Sign in' : 'Create account'}</button>

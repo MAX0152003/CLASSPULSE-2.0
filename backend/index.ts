@@ -1,5 +1,5 @@
-import { router, json, error, requireAuth, db, storage, notifications, ws } from '@appdeploy/sdk';
-import type { RouterMiddleware } from '@appdeploy/sdk';
+import { router, json, error, requireAuth, db, storage, notifications, ws } from './vercel-sdk';
+import type { RouterMiddleware } from './vercel-sdk';
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 
 type Role = 'Student' | 'Faculty' | 'System Administrator';
