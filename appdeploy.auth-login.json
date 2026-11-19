@@ -1,0 +1,19 @@
+{
+  "methods": [
+    "google",
+    "apple",
+    "email"
+  ],
+  "headline": "Sign in to ClassPulse",
+  "subtitle": "Verify your email or continue with Google or Apple. Choose your campus role after signing in.",
+  "style": {
+    "mode": "default",
+    "accentColor": "#196c52",
+    "backgroundColor": "#f2f7f3",
+    "panelColor": "#ffffff",
+    "textColor": "#173629",
+    "borderRadius": 18,
+    "fontFamily": "Inter, system-ui, sans-serif"
+  },
+  "icon": "/resources/classpulse-symbol.svg"
+}

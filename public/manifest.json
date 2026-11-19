@@ -1,0 +1,18 @@
+{
+  "name": "ClassPulse",
+  "short_name": "ClassPulse",
+  "description": "ClassPulse academic scheduling, dynamic QR attendance, Faculty live status, consultations and secure offline captures.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f5f8f3",
+  "theme_color": "#19392d",
+  "icons": [
+    {
+      "src": "/resources/classpulse-symbol.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
