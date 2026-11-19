@@ -1703,10 +1703,28 @@ export default function App() {
   }
   async function openMeeting(sectionId: string) {
     const { data: r } = await api.post('/api/sessions/open', { sectionId });
-    setCurrentSession((r as { meeting: Meeting }).meeting);
+    const openedMeeting=(r as { meeting: Meeting }).meeting;
+    setCurrentSession(openedMeeting);
     setModal('qr');
+    // Make the status visible immediately; the availability endpoint persists it.
+    void setFacultyPresence('IN CLASS');
     await refreshDashboard();
   }
+  // While this faculty workspace is open, automatically restore availability
+  // when the QR meeting ends. Server-side scheduling is still required for
+  // updates that must happen while all devices are offline.
+  useEffect(() => {
+    if(!isFaculty || !currentSession || myPresence.status!=='IN CLASS')return;
+    const end=Date.parse(currentSession.endAt);
+    if(!Number.isFinite(end))return;
+    const check=()=>{
+      if(Date.now()>=end)void setFacultyPresence('AVAILABLE');
+    };
+    check();
+    const interval=window.setInterval(check,15000);
+    return ()=>window.clearInterval(interval);
+  },[isFaculty,currentSession?.id,currentSession?.endAt,myPresence.status]);
+
   async function qrModal(meeting: Meeting) { setCurrentSession(meeting); setModal('qr'); }
   async function rosterModal(meeting: Meeting) {
     setCurrentSession(meeting);
