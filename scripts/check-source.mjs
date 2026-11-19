@@ -110,7 +110,11 @@ const cases={
   'No registration password in sessionStorage':!app.includes('sessionStorage.setItem(signupKey,JSON.stringify({...details,password'),
   'Signup requests password confirmation':app.includes('signupPassword!==confirmPassword'),
   'Google Apple OAuth remains available':platform.includes('signInWithOAuth')&&app.includes("beginOAuth('google')")&&app.includes("beginOAuth('apple')"),
-  'Unavailable Web Push is disclosed':platform.includes('push-not-configured')||platform.includes('Web push has not been configured'),
+  'Opt-in Web Push uses a real service worker and server-side subscription':
+    platform.includes("navigator.serviceWorker.register('/sw.js'") &&
+    platform.includes("await api.post('/api/push/subscribe'") &&
+    api.includes("'POST /api/push/unsubscribe'") &&
+    fs.existsSync(path.join(root,'public/sw.js')),
 
  'Admin cannot create course sections':!api.includes("'POST /api/admin/section':"),
  'Admin cannot modify course sections':!api.includes("'POST /api/admin/section/:id/update':"),
