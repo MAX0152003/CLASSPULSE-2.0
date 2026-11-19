@@ -1011,7 +1011,7 @@ export default function App() {
       }
       startX = event.touches[0].clientX;
       startY = event.touches[0].clientY;
-      eligible = drawer || startX > window.innerWidth - Math.min(72, window.innerWidth * .18);
+      eligible = true; // Page-wide horizontal swipe, excluding interactive card and form regions.
     };
     const onEnd = (event: TouchEvent) => {
       if (!eligible || !event.changedTouches.length) return;
