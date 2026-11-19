@@ -598,7 +598,7 @@ function WeekTimetable({
   const tall=Math.max(topClasses.length,previewClasses.length,farClasses.length);
   // Card stack includes a dedicated clearance area for the 2 visible undercards.
   // Keep every layer inside the stage so weekday controls below are never obscured.
-  const deckHeight=Math.min(680,Math.max(312,238+Math.min(5,tall)*84));
+  const deckHeight=Math.min(760,Math.max(350,260+Math.min(5,tall)*92));
   const reducedHint='Swipe for next day · swipe back for previous';
   const renderCard=(dayIndex:number,depth:0|1|2|3)=>{
     const day=days[dayIndex];
@@ -2145,7 +2145,7 @@ export default function App() {
             action={isStudent ? <button className='cp-button dark' onClick={() => setModal('join')}><Plus size={17}/> Join a class</button> : isFaculty ? <button className='cp-button dark' onClick={newMySubject}><Plus size={17}/> Add subject</button> : isAdmin ? <button className='cp-button dark' onClick={() => setModal('create-section')}><Plus size={17}/> Create class</button> : undefined}/>
           {!isAdmin && !expandedSubjectId && <ClassDayFocus sections={sections}/>}
           {!isAdmin && !expandedSubjectId && sections.length>0 && <section id='classpulse-week-schedule' className='cp-panel cp-week-panel'>
-            <div className='cp-week-toolbar'><div><span>WEEKLY SCHEDULE</span></div>
+            <div className='cp-week-toolbar'><div><span>MY CLASS WEEK</span></div>
               <button className='cp-mini-btn cp-week-export' onClick={()=>{
                 if(!exportWeeklyCalendar(sections,isFaculty?'faculty':'student')) showMessage('No active class schedule to export.');
                 else showMessage('Calendar saved. Import the .ics file into your calendar app.');
@@ -2699,12 +2699,12 @@ export default function App() {
                 <SectionTitle eyebrow='YOUR EXPERIENCE' title='Display & notifications'/>
                 <div className='cp-settings-list'>
                   <div className='cp-density-setting'>
-                    <span><Settings size={18}/> View density</span>
-                    <div role='group' aria-label='Dashboard spacing'>
+                    <span><Settings size={18}/> Text size</span>
+                    <div role='group' aria-label='Interface text size'>
                       {(['compact','comfortable','spacious'] as const).map(item=>
                         <button type='button' aria-pressed={density===item} key={item}
                           className={density===item?'selected':''} onClick={()=>setDensity(item)}>
-                          {item === 'compact' ? 'Compact' : item === 'comfortable' ? 'Comfortable' : 'Spacious'}
+                          {item === 'compact' ? 'Standard' : item === 'comfortable' ? 'Large' : 'Extra large'}
                         </button>)}
                     </div>
                   </div>
@@ -2732,9 +2732,6 @@ export default function App() {
                     <span><Bell size={18}/> Academic notifications</span><strong>Enable <ArrowUpRight size={14}/></strong>
                   </button>
 
-                  <button onClick={()=>safeRun('sign-out',signOut)}>
-                    <span><LogOut size={18}/> Sign out</span><strong>Exit <ArrowUpRight size={14}/></strong>
-                  </button>
                   {!isAdmin&&<button type='button' className='cp-delete-account-link'
                     onClick={()=>{setDeleteConfirm('');setModal('delete-account');}}>
                     <span><ShieldCheck size={18}/> Delete account</span><strong>Manage <ArrowUpRight size={14}/></strong>
