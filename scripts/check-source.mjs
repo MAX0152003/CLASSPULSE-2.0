@@ -35,6 +35,28 @@ const vercelConfig=JSON.parse(read('vercel.json'));
 const databaseSql=read('supabase/schema.sql');
 const cases={
   'No AppDeploy runtime imports in frontend':!app.includes("from '@appdeploy/client'"),
+  'Swipe left opens navigation without hijacking the schedule deck':
+    app.includes("if(!drawer&&dx<0)setDrawer(true)")&&
+    app.includes("cp-deck-stage,.cp-deck-days")&&
+    app.includes("body.style.position='fixed'")&&
+    app.includes("removeEventListener('touchmove',preventBackground)"),
+  'Photo editor has zoom, drag crop, and explicit save':
+    app.includes("photoDragRef.current")&&app.includes("setPointerCapture(ev.pointerId)")&&
+    app.includes("photoCropCanvas.current")&&app.includes("cp-photo-reset")&&
+    app.includes("async function uploadPhoto()"),
+  'First signed QR auto-enrolls atomically with pending faculty verification':
+    api.includes("reason = !verifiedToken ? 'INVALID_SIGNATURE'")&&
+    api.includes("db.tx.add('cp_enrollments',[enrollment])")&&
+    api.includes("db.tx.add('cp_attendance',[record])")&&
+    api.includes("First QR enrollment: faculty photo verification required"),
+  'Admin reports visualize real submitted issues, not invented device telemetry':
+    api.includes("dailyReports,issueCategories")&&
+    api.includes("Offline devices and unreported crashes cannot be monitored live")&&
+    app.includes("function SystemHealthGraphs")&&app.includes("Only user-submitted incident reports are counted."),
+  'Faculty overview no longer contains unnecessary QR metric action strip':
+    !app.includes("Students see your published status.")&&
+    !app.includes("Manage QR attendance <ArrowRight")&&
+    !app.includes("className='cp-faculty-pulse'"),
   'No AppDeploy runtime imports in backend':!api.includes("from '@appdeploy/sdk'"),
   'Vercel API route uses ESM-safe backend import':apiFunction.includes("from '../backend/index.js'"),
   'All nested API routes rewrite to a single Vercel Function':

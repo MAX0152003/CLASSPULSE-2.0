@@ -980,32 +980,57 @@ export const handler = router({
     const validTime = Number.isFinite(cap) && !!verifiedToken
       && cap >= slotStart - 2000 && cap <= slotStart + 18000
       && ageMs >= -30000 && ageMs <= 12 * 60 * 60 * 1000;
-    const reason = !membership ? 'NOT_ENROLLED'
-      : !verifiedToken ? 'INVALID_SIGNATURE'
-        : !validTime ? 'TIMESTAMP_OR_SYNC_WINDOW_INVALID'
-          : 'VALID_TOKEN';
+    const reason = !verifiedToken ? 'INVALID_SIGNATURE'
+      : !validTime ? 'TIMESTAMP_OR_SYNC_WINDOW_INVALID'
+        : 'VALID_TOKEN';
     await db.add('cp_verification', [{
       sessionId: meeting.id, studentId: p.userId, clientScanId,
       capturedAt, receivedAt, result: reason === 'VALID_TOKEN' ? 'TOKEN_VALID' : 'REJECTED',
       integrityFlag: reason !== 'VALID_TOKEN', reason,
     }]);
     if (reason !== 'VALID_TOKEN') return error('Scan rejected: ' + reason.replace(/_/g, ' ').toLowerCase(), 422);
+    const section=await get<Section>('cp_sections',meeting.sectionId);
+    if(!section||section.archivedAt)return error('This QR belongs to an inactive section',409);
+    if(!p.onboardingComplete)return error('Complete your student profile before scanning QR',403);
+    const autoEnrolled=!membership;
     const id = attendanceId(p.userId, meeting.id);
     const old = await get<Attendance>('cp_attendance', id);
     if (old) return json({ ok: true, duplicate: true, attendance: old });
     // Delayed submissions are held for faculty review because the phone clock is not trusted proof.
-    const requiresReview = ageMs > 90000 || meeting.status === 'CLOSED';
+    const requiresReview = autoEnrolled || ageMs > 90000 || meeting.status === 'CLOSED';
     const record: Attendance = {
       id, sessionId: meeting.id, sectionId: meeting.sectionId, studentId: p.userId,
       academicStatus: requiresReview ? 'PENDING REVIEW' : presentStatus(meeting, cap),
       verificationStatus: requiresReview ? 'PENDING_REVIEW' : 'ACCEPTED',
-      capturedAt, receivedAt, clientScanId, reviewReason: requiresReview ? 'Offline/delayed capture requires faculty confirmation' : '',
+      capturedAt, receivedAt, clientScanId,
+      reviewReason:autoEnrolled?'First QR enrollment: faculty photo verification required':
+        requiresReview?'Offline/delayed capture requires faculty confirmation':'',
       updatedAt: nowIso(),
     };
-    const saved = await add('cp_attendance', record);
-    if (!saved) return error('A scan for this session is already recorded', 409);
+    if(autoEnrolled){
+      // A valid signed QR can join the section. Enrollment and attendance must
+      // commit atomically; invalid/expired QR never creates a class membership.
+      const enrollment={id:memberId(p.userId,meeting.sectionId),
+        studentId:p.userId,sectionId:meeting.sectionId,createdAt:receivedAt};
+      try{
+        await db.transact([
+          db.tx.add('cp_enrollments',[enrollment]),
+          db.tx.add('cp_attendance',[record]),
+        ]);
+      }catch{
+        const previous=await get<Attendance>('cp_attendance',id);
+        if(previous)return json({ok:true,duplicate:true,attendance:previous,autoEnrolled:false});
+        return error('Could not enroll and record attendance together. Retry with a fresh QR.',409);
+      }
+      await audit(p.userId,'AUTO_ENROLL_VALID_QR','CourseSection',meeting.sectionId);
+      await notify(meeting.facultyId,'New student QR enrollment',
+        section.courseCode+': '+p.name+' joined by scanning. Verify their photo and attendance.', 'attendance');
+    }else{
+      const saved=await add('cp_attendance',record);
+      if(!saved)return error('A scan for this session is already recorded',409);
+    }
     await audit(p.userId, 'SUBMIT_QR_SCAN', 'ClassSession', meeting.id);
-    return json({ ok: true, attendance: record, review: requiresReview });
+    return json({ ok:true, attendance:record, review:requiresReview, autoEnrolled });
   }],
   'GET /api/attendance': [requireAuth(), async (ctx) => {
     const p = await me(ctx.user!);
@@ -1385,6 +1410,18 @@ export const handler = router({
       list<Profile>('cp_profiles',250),
     ]);
     const open=issues.filter(i=>i.status==='OPEN');
+    const tz='Asia/Manila';
+    const localDay=(time:string)=>new Date(time).toLocaleDateString('en-CA',{
+      timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit'
+    });
+    const dailyReports=Array.from({length:7},(_,index)=>{
+      const date=new Date(Date.now()-(6-index)*86400000);
+      const day=localDay(date.toISOString());
+      return {day,label:date.toLocaleDateString('en-PH',{timeZone:tz,weekday:'short'}),
+        count:issues.filter(item=>localDay(item.createdAt)===day).length};
+    });
+    const issueCategories=(['crash','network','sync','account','other'] as const)
+      .map(kind=>({kind,count:issues.filter(item=>item.kind===kind).length}));
     const delayed=records.filter(a=>Number.isFinite(Date.parse(a.receivedAt))&&
       Number.isFinite(Date.parse(a.capturedAt))&&
       Date.parse(a.receivedAt)-Date.parse(a.capturedAt)>900000);
@@ -1393,10 +1430,14 @@ export const handler = router({
       incompleteAccounts:accounts.filter(p=>!p.deletedAt&&!p.onboardingComplete).length,
       pendingReviewScans:records.filter(a=>a.verificationStatus==='PENDING_REVIEW').length,
       delayedSyncReports:delayed.length,scanSampleSize:records.length,
-      openIssueCount:open.length,
+      openIssueCount:open.length,totalIssueCount:issues.length,
+      resolvedIssueCount:issues.filter(i=>i.status==='RESOLVED').length,
+      highSeverityOpen:open.filter(i=>i.severity==='HIGH').length,
+      lastReportedAt:[...issues].sort((a,b)=>b.createdAt.localeCompare(a.createdAt))[0]?.createdAt||null,
+      dailyReports,issueCategories,
       openIssues:open.sort((a,b)=>b.createdAt.localeCompare(a.createdAt)).slice(0,35)
         .map(({reporterId,...rest})=>rest),
-      caveat:'Only stored samples are visible. Devices that have not synchronized cannot be monitored live.'});
+      caveat:'Reports and upload delays are sampled from stored records only. Offline devices and unreported crashes cannot be monitored live.'});
   }],
   'POST /api/admin/system-issues/:id/resolve': [requireAuth(),adminGuard,async(ctx)=>{
     const issue=await get<SystemIssue>('cp_system_issues',ctx.params.id);

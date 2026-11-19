@@ -15,6 +15,17 @@ import type { LucideIcon } from 'lucide-react';
 import { Search } from 'lucide-react';
 
 type Role = 'Student' | 'Faculty' | 'System Administrator';
+type SystemHealthData={
+  checkedAt:string;api:string;accounts:number;incompleteAccounts:number;
+  pendingReviewScans:number;delayedSyncReports:number;scanSampleSize:number;
+  openIssueCount:number;totalIssueCount:number;resolvedIssueCount:number;
+  highSeverityOpen:number;lastReportedAt:string|null;
+  dailyReports:Array<{day:string;label:string;count:number}>;
+  issueCategories:Array<{kind:string;count:number}>;
+  caveat:string;
+  openIssues:Array<{id:string;kind:string;message:string;severity:string;createdAt:string;status:string}>;
+};
+
 type NavPage = 'Overview' | 'Classes' | 'Attendance' | 'Student Records' | 'Excuses' | 'Consultations' | 'Notifications' | 'Administration' | 'Profile' | 'Settings';
 type Profile = { userId: string; name: string; email: string; role: Role; studentNumber?: string; department?: string; bio?: string; contactPhone?: string; yearLevel?: string; officeRoom?: string; roleRequest?: string; photoVerified?: boolean; onboardingComplete?: boolean; deletedAt?:string };
 type FacultyLive = { facultyId: string; name: string; status: string; updatedAt: string | null; classCodes: string[]; source: string };
@@ -39,7 +50,7 @@ type Booking = { id: string; slotId: string; studentId: string; topic: string; s
 type Notice = { id: string; title: string; body: string; kind: string; createdAt: string; read: boolean };
 type AuthUser = { userId: string; email?: string; name?: string };
 type Dashboard = { profile: Profile; sections: Section[]; meetings: Meeting[]; attendance: Attendance[]; excuses: Excuse[]; bookings: Booking[]; notices: Notice[]; currentDate: string };
-type UserDirectory = { userId: string; name: string; email: string; role: string; roleRequest: string; photoVerified: boolean };
+type UserDirectory = { userId: string; name: string; email: string; role: string; roleRequest: string; photoVerified: boolean; onboardingComplete?:boolean };
 type Outbox = QueuedScan;
 type PresenceStatus = 'AVAILABLE'|'IN CLASS'|'AWAY'|'NOT SET';
 type FacultyRoster = {
@@ -237,6 +248,41 @@ function ClassDayFocus({ sections }: { sections: Section[] }) {
         : <p>{todaySections.length ? 'Classes finished today.' : 'No classes today.'}</p>}
     </div>
   </section>;
+}
+
+function SystemHealthGraphs({health}:{health:SystemHealthData|null}){
+  const days=health?.dailyReports||[];
+  const categories=health?.issueCategories||[];
+  const largest=Math.max(1,...days.map(day=>day.count));
+  const total=Math.max(1,health?.totalIssueCount||0);
+  return <div className='cp-system-graphs'>
+    <section className='cp-panel cp-system-graph' aria-label='Seven day technical issue trend'>
+      <div className='cp-system-graph-title'><div><span>7-DAY REPORTS</span><h3>Issue activity</h3></div>
+        <strong>{health?.totalIssueCount??'—'}<small>stored reports</small></strong></div>
+      <div className='cp-system-chart'>
+        {days.map(day=><div className='cp-system-chart-day' key={day.day}
+          title={day.day+': '+day.count+' submitted reports'}>
+          <strong>{day.count||''}</strong>
+          <div className='cp-system-chart-track'><i style={{height:(day.count/ largest*100)+'%'}}/></div>
+          <span>{day.label}</span>
+        </div>)}
+      </div>
+      <p>Reports submitted through ClassPulse, not automatically detected crashes.</p>
+    </section>
+    <section className='cp-panel cp-system-graph' aria-label='Technical issue categories'>
+      <div className='cp-system-graph-title'><div><span>REPORT CATEGORIES</span><h3>Where users need help</h3></div>
+        <strong>{health?.openIssueCount??'—'}<small>open</small></strong></div>
+      <div className='cp-system-kind-bars'>
+        {categories.map(item=><div key={item.kind} className='cp-system-kind'>
+          <div><span>{({crash:'App crashes',network:'Connectivity',sync:'Offline & sync',
+            account:'Account access',other:'Other'} as Record<string,string>)[item.kind]||item.kind}</span>
+            <strong>{item.count}</strong></div>
+          <div className='cp-system-kind-track'><i style={{width:(item.count/total*100)+'%'}}/></div>
+        </div>)}
+      </div>
+      <p>Only user-submitted incident reports are counted.</p>
+    </section>
+  </div>;
 }
 
 function OfflineSyncCenter({
@@ -1068,14 +1114,10 @@ export default function App() {
   const [photoPanY,setPhotoPanY]=useState(0);
   const [photoReady,setPhotoReady]=useState(false);
   const photoCropCanvas=useRef<HTMLCanvasElement|null>(null);
+  const photoDragRef=useRef<{x:number;y:number;panX:number;panY:number}|null>(null);
   const menuSwipeRef=useRef<{x:number;y:number}|null>(null);
   const [expandedNotice,setExpandedNotice]=useState<Notice|null>(null);
-  const [systemHealth,setSystemHealth]=useState<{
-    checkedAt:string;api:string;accounts:number;incompleteAccounts:number;
-    pendingReviewScans:number;delayedSyncReports:number;scanSampleSize:number;
-    openIssueCount:number;caveat:string;
-    openIssues:Array<{id:string;kind:string;message:string;severity:string;createdAt:string;status:string}>;
-  }|null>(null);
+  const [systemHealth,setSystemHealth]=useState<SystemHealthData|null>(null);
   const [userInvites,setUserInvites]=useState<Array<{
     id:string;email:string;role:string;status:string;createdAt:string;expiresAt:string;
   }>>([]);
@@ -1113,23 +1155,51 @@ export default function App() {
   const navigate=(target:NavPage)=>{
     const destination=isAdmin&&['Classes','Attendance','Student Records','Excuses','Consultations','Notifications'].includes(target)
       ?'Administration':target;
-    setPage(destination as NavPage);setDrawer(false);
-    window.scrollTo({top:0,behavior:'smooth'});
+    setPage(destination as NavPage);
+    setDrawer(false);
+    // Defer scrolling until the locked mobile menu releases the document.
+    window.requestAnimationFrame(()=>window.requestAnimationFrame(()=>
+      window.scrollTo({top:0,behavior:'auto'})));
   };
-  // Edge-only left swipe opens the menu without stealing the weekly schedule gestures.
+  // A deliberate left swipe across normal app content opens the menu.
+  // Keep class-deck swipes and form interactions independent.
   const navTouchStart=(ev:React.TouchEvent<HTMLDivElement>)=>{
-    if(window.innerWidth>920||modal){menuSwipeRef.current=null;return;}
+    if(window.innerWidth>920||modal||ev.touches.length!==1){menuSwipeRef.current=null;return;}
+    const target=ev.target;
+    if(!drawer&&target instanceof Element&&target.closest(
+      '.cp-deck-stage,.cp-deck-days,.cp-slot-carousel,.cp-week-panel,input,textarea,select,canvas,[data-no-menu-swipe]'
+    )){menuSwipeRef.current=null;return;}
     const t=ev.touches[0];
-    menuSwipeRef.current=(drawer||t.clientX>=window.innerWidth-55)?{x:t.clientX,y:t.clientY}:null;
+    menuSwipeRef.current={x:t.clientX,y:t.clientY};
   };
   const navTouchEnd=(ev:React.TouchEvent<HTMLDivElement>)=>{
     const start=menuSwipeRef.current;menuSwipeRef.current=null;
     if(!start||window.innerWidth>920||modal)return;
     const touch=ev.changedTouches[0],dx=touch.clientX-start.x,dy=touch.clientY-start.y;
-    if(Math.abs(dx)<64||Math.abs(dx)<Math.abs(dy)*1.5)return;
+    if(Math.abs(dx)<76||Math.abs(dx)<Math.abs(dy)*1.7)return;
     if(!drawer&&dx<0)setDrawer(true);
     else if(drawer&&dx>0)setDrawer(false);
   };
+  // Lock the page behind an open drawer, including iOS overscroll.
+  useEffect(()=>{
+    if(!drawer)return;
+    const y=window.scrollY;
+    const body=document.body;
+    const previous={position:body.style.position,top:body.style.top,
+      width:body.style.width,overflow:body.style.overflow};
+    body.style.position='fixed';body.style.top='-'+y+'px';
+    body.style.width='100%';body.style.overflow='hidden';
+    const preventBackground=(ev:TouchEvent)=>{
+      if(!(ev.target instanceof Element&&ev.target.closest('.cp-drawer')))ev.preventDefault();
+    };
+    document.addEventListener('touchmove',preventBackground,{passive:false});
+    return ()=>{
+      document.removeEventListener('touchmove',preventBackground);
+      body.style.position=previous.position;body.style.top=previous.top;
+      body.style.width=previous.width;body.style.overflow=previous.overflow;
+      window.scrollTo({top:y,behavior:'auto'});
+    };
+  },[drawer]);
   const openScanner = () => {
     if (!isStudent) return;
     failedScanRef.current = { token: '', at: 0 };
@@ -1644,9 +1714,12 @@ export default function App() {
         const response = await api.post('/api/attendance/scan', {
           token, capturedAt, clientScanId: crypto.randomUUID(),
         });
-        showMessage((response.data as { review: boolean }).review
-          ? 'QR recorded and awaiting faculty timestamp review.'
-          : 'Attendance automatically verified and recorded.');
+        const result=response.data as {review:boolean;autoEnrolled?:boolean};
+        showMessage(result.autoEnrolled
+          ? 'Successfully joined the class through its QR. Your attendance awaits faculty photo verification.'
+          : result.review
+            ? 'QR recorded and awaiting faculty timestamp review.'
+            : 'Attendance automatically verified and recorded.');
         await refreshPage('Attendance');
       }
       setScanStatus('success');
@@ -2427,13 +2500,14 @@ export default function App() {
               <button className='cp-system-metric' onClick={()=>navigate('Administration')}>
                 <Activity size={22}/><strong>{systemHealth?.openIssueCount??'—'}</strong><span>Reported problems</span></button>
             </div>
+            <SystemHealthGraphs health={systemHealth}/>
             <section className='cp-panel cp-system-observability'>
               <SectionTitle eyebrow='OBSERVABILITY' title='Reported system activity'/>
               <p>{systemHealth?.caveat||'Only uploaded device activity can be examined.'}</p>
               <div className='cp-system-status-pair'>
-                <span>Scans requiring review <strong>{systemHealth?.pendingReviewScans??'—'}</strong></span>
-                <span>Records sampled <strong>{systemHealth?.scanSampleSize??'—'}</strong></span>
-                <span>Faculty access requests <strong>{pendingRoleUsers.length}</strong></span>
+                <span>Critical open reports <strong>{systemHealth?.highSeverityOpen??'—'}</strong></span>
+                <span>Resolved reports <strong>{systemHealth?.resolvedIssueCount??'—'}</strong></span>
+                <span>Last report <strong>{systemHealth?.lastReportedAt?dateFmt(systemHealth.lastReportedAt):'None'}</strong></span>
               </div>
               <button className='cp-mini-btn' onClick={()=>safeRun('refresh-health',refreshAdministration)}>
                 <RefreshCcw size={15}/> Refresh system status</button>
@@ -2520,9 +2594,6 @@ export default function App() {
                   {myPresence.status==='NOT SET'?'Status not set':myPresence.status.toLowerCase()}
                   {myPresence.updatedAt ? ' · '+dateFmt(myPresence.updatedAt) : ''}
                 </p>
-                <p className='cp-chart-note'>Students see your published status. A live QR session may temporarily show “In class.”</p>
-                <div className='cp-faculty-pulse'><span><QrCode size={17}/> {liveSessions.length} active QR sessions</span><span><FileText size={17}/> {pendingExcuses} pending excuses</span></div>
-                <button className='cp-button dark' onClick={() => navigate('Attendance')}>Manage QR attendance <ArrowRight size={16}/></button>
               </section>
             </div>
             <div className='cp-two-column cp-monitoring-grid'>
@@ -2845,8 +2916,9 @@ export default function App() {
         </>}
 
         {page==='Administration'&&isAdmin&&<>
-          <SectionTitle eyebrow='SYSTEM OPERATIONS' title='Account & issue management'
-            subtitle='Manage users and invitations, review technical reports, and inspect system access.'/>
+          <SectionTitle eyebrow='SYSTEM OPERATIONS' title='Health, access & incident monitoring'
+            subtitle='Review crash reports, offline synchronization, connectivity and account issues. Academic records remain with faculty.'/>
+          <SystemHealthGraphs health={systemHealth}/>
           <section className='cp-panel cp-admin-invites-panel'>
             <div className='cp-admin-invites-head'>
               <div><strong>User invitations</strong>
@@ -2892,8 +2964,8 @@ export default function App() {
             <p className='cp-admin-invite-hint'>Invited administrators sign in using the exact approved email.</p>
           </section>
           <section className='cp-panel cp-admin-accounts'>
-            <SectionTitle eyebrow='ACCOUNTS' title='User directory'
-              subtitle='Review faculty requests. No academic section management.'/>
+            <SectionTitle eyebrow='ACCOUNT ACCESS' title='User directory'
+              subtitle='Find registration and access problems; academic records remain with faculty.'/>
             <div className='cp-admin-filter-bar'>
               <label><Search size={16}/><input aria-label='Filter account directory'
                 value={accountQuery} onChange={ev=>setAccountQuery(ev.target.value)}
@@ -2910,12 +2982,7 @@ export default function App() {
               {filteredUsers.slice(0,90).map(user=><div className='cp-admin-user' key={user.userId}>
                 <span className='cp-user-avatar'>{user.name?.[0]||'?'}</span>
                 <div><strong>{user.name}</strong><small>{user.email} · {user.role}</small></div>
-                {user.role==='Student'&&user.roleRequest==='Faculty'&&
-                  <button type='button' className='cp-mini-btn'
-                    onClick={()=>safeRun('approve-faculty',async()=>{
-                      await api.post('/api/admin/role',{userId:user.userId,role:'Faculty'});
-                      await refreshAdministration();showMessage('Faculty role approved.');
-                    })}>Approve Faculty</button>}
+                {user.onboardingComplete===false&&<span className='cp-account-help'>Setup pending</span>}
               </div>)}
               {!filteredUsers.length&&<Empty title='No matching accounts'
                 detail='Try a different filter or search.' icon={Users}/>}
@@ -3051,15 +3118,34 @@ export default function App() {
               </div>
               {photoFile&&<div className='cp-photo-editor'>
                 <div className='cp-photo-editor-heading'><strong>Adjust your picture</strong>
-                  <span>Zoom and reposition before saving</span></div>
+                  <span>Drag to reposition · slide to zoom · preview before saving</span></div>
                 <canvas ref={photoCropCanvas} width={320} height={320} className='cp-photo-preview'
-                  role='img' aria-label='Square cropped profile picture preview'/>
-                <label>Zoom <input type='range' min='1' max='3' step='.05' value={photoZoom}
-                  onChange={ev=>setPhotoZoom(Number(ev.target.value))}/></label>
-                <label>Left / right <input type='range' min='-100' max='100' step='2'
-                  value={photoPanX} onChange={ev=>setPhotoPanX(Number(ev.target.value))}/></label>
-                <label>Up / down <input type='range' min='-100' max='100' step='2'
-                  value={photoPanY} onChange={ev=>setPhotoPanY(Number(ev.target.value))}/></label>
+                  role='img' aria-label='Drag to position your square profile picture'
+                  onPointerDown={ev=>{
+                    photoDragRef.current={x:ev.clientX,y:ev.clientY,panX:photoPanX,panY:photoPanY};
+                    ev.currentTarget.setPointerCapture(ev.pointerId);
+                  }}
+                  onPointerMove={ev=>{
+                    const start=photoDragRef.current;
+                    if(!start)return;
+                    const bounds=ev.currentTarget.getBoundingClientRect();
+                    const distance=Math.max(80,bounds.width);
+                    setPhotoPanX(Math.max(-100,Math.min(100,start.panX-(ev.clientX-start.x)/distance*150)));
+                    setPhotoPanY(Math.max(-100,Math.min(100,start.panY-(ev.clientY-start.y)/distance*150)));
+                  }}
+                  onPointerUp={ev=>{
+                    photoDragRef.current=null;
+                    if(ev.currentTarget.hasPointerCapture(ev.pointerId))ev.currentTarget.releasePointerCapture(ev.pointerId);
+                  }}
+                  onPointerCancel={()=>{photoDragRef.current=null;}}/>
+                <label>Zoom · {Math.round(photoZoom*100)}%
+                  <input type='range' min='1' max='3' step='.05' value={photoZoom}
+                    onChange={ev=>setPhotoZoom(Number(ev.target.value))}/>
+                </label>
+                <button type='button' className='cp-mini-btn cp-photo-reset'
+                  onClick={()=>{setPhotoZoom(1);setPhotoPanX(0);setPhotoPanY(0);}}>
+                  <RefreshCcw size={14}/> Reset crop
+                </button>
                 <div className='cp-photo-editor-actions'>
                   <button type='button' className='cp-mini-btn'
                     onClick={()=>{setPhotoFile(null);setPhotoReady(false);}}>Cancel</button>
