@@ -2536,3 +2536,35 @@ html[data-density='spacious'] .cp-panel label { font-size:max(17px, 1em); }
   .cp-record-filters .cp-field:first-child,
   .cp-record-filters .cp-record-export { grid-column:auto; }
 }
+
+
+/* ClassPulse: in-roster corrections and compact accessible controls */
+.cp-inline-correction {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: end;
+  width: 100%;
+  padding: 12px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--cp-accent, #3b82f6) 7%, transparent);
+}
+.cp-inline-correction .cp-field { flex: 1 1 170px; min-width: 0; margin: 0; }
+.cp-inline-correction .cp-field input,
+.cp-inline-correction .cp-field select { min-height: 42px; font-size: 16px; }
+.cp-inline-correction .cp-mini-btn { min-height: 42px; }
+.cp-record-filters { gap: 8px !important; align-items: end; }
+.cp-record-filters .cp-field { min-width: 0; margin-bottom: 0; }
+.cp-record-filters input, .cp-record-filters select { min-height: 40px; font-size: 16px; }
+@media (max-width: 680px) {
+  .cp-record-filters { display:grid !important; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+  .cp-record-filters .cp-field:first-child,
+  .cp-record-filters .cp-field:nth-child(2) { grid-column:1/-1; }
+  .cp-record-filters .cp-record-export { grid-column:1/-1; }
+  .cp-inline-correction { padding:10px; }
+}
+@media (prefers-reduced-motion: no-preference) and (hover:hover) {
+  .cp-record-student { transition: box-shadow .2s ease, transform .2s ease; }
+  .cp-record-student:hover { transform:translateY(-1px); box-shadow:0 7px 22px rgba(19,38,70,.08); }
+}
