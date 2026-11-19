@@ -2341,6 +2341,12 @@ export default function App() {
                       &&(recordStatusFilter==='ALL'||r.academicStatus===recordStatusFilter)
                       &&(!recordFrom||stamp>=recordFrom)&&(!recordUntil||stamp<=recordUntil);
                   }).sort((x,y)=>y.receivedAt.localeCompare(x.receivedAt));
+                  // Informational risk estimate only; the backend remains authoritative
+                  // for excused absences, attendance conversion, and drop decisions.
+                  const absenceCount=student.counts.ABSENT;
+                  const lateCount=student.counts.LATE;
+                  const riskCount=absenceCount+Math.floor(lateCount/3);
+                  const attendanceWarning=riskCount>=5?'DROP REVIEW':riskCount>=3?'HIGH RISK':riskCount>=2?'WARNING':'';
                   const open=expandedStudent===student.studentId;
                   return <article className='cp-record-student' key={student.studentId}>
                     <button type='button' className='cp-record-student-head'
@@ -2353,6 +2359,9 @@ export default function App() {
                         <small>{student.counts.PRESENT} present</small>
                         <small>{student.counts.LATE} late</small>
                         <small>{student.counts.ABSENT} absent</small></span>
+                      {attendanceWarning&&<Pill color={riskCount>=5?'red':'amber'}>
+                        <span aria-hidden='true'>● </span>{attendanceWarning}
+                      </Pill>}
                       {student.pendingReview>0&&<Pill color='amber'>{student.pendingReview} pending</Pill>}
                       <ChevronRight size={18} className={open?'rotated':''}/>
                     </button>
