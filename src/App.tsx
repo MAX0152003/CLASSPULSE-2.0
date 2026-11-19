@@ -9,7 +9,7 @@ import {
   Check, CheckCircle2, ChevronRight, Clock3, CloudOff, Download, FileCheck2,
   FileText, GraduationCap, LayoutDashboard, LockKeyhole, LogIn, LogOut, Menu,
   Moon, Plus, QrCode, RefreshCcw, ScanLine, Settings, ShieldCheck,
-  Sparkles, Sun, UserCheck, Users, Wifi, X,
+  Sparkles, Sun, UserCheck, Users, Wifi, X, Eye, EyeOff, Mail, KeyRound, ArrowLeft,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { Search } from 'lucide-react';
@@ -51,6 +51,8 @@ type FormState = Record<string, string>;
 type EntryMode = 'signin' | 'signup';
 type SignupDraft = { name: string; email: string; studentNumber: string; requestedRole: Role };
 const signupKey = 'cp-signup-draft';
+const strongEnough=(p:string)=>p.length>=8&&/[A-Za-z]/.test(p)&&/[0-9]/.test(p);
+const emailLooksValid=(value:string)=>/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value.trim());
 function readSignupDraft(): SignupDraft | null {
   try {
     const raw = sessionStorage.getItem(signupKey);
@@ -981,7 +983,17 @@ export default function App() {
   const [entryMode, setEntryMode] = useState<EntryMode | null>(null);
   const [authRedirecting, setAuthRedirecting] = useState(false);
   const [loginEmail,setLoginEmail]=useState('');
-  const [loginProvider,setLoginProvider]=useState<'email'|'google'|'apple'>('email');
+  const [loginPassword,setLoginPassword]=useState('');
+  const [signupPassword,setSignupPassword]=useState('');
+  const [confirmPassword,setConfirmPassword]=useState('');
+  const [passwordVisible,setPasswordVisible]=useState(false);
+  const [forgotPassword,setForgotPassword]=useState(false);
+  const [resetEmailSent,setResetEmailSent]=useState(false);
+  const [passwordRecoveryMode,setPasswordRecoveryMode]=useState(false);
+  const [recoveryPassword,setRecoveryPassword]=useState('');
+  const [recoveryConfirm,setRecoveryConfirm]=useState('');
+  const [pendingEmail,setPendingEmail]=useState('');
+  const [authNotice,setAuthNotice]=useState('');
   const [verificationSent,setVerificationSent]=useState(false);
   const [roleChoiceConfirmed,setRoleChoiceConfirmed]=useState(false);
   const [deleteConfirm,setDeleteConfirm]=useState('');
@@ -1301,30 +1313,61 @@ export default function App() {
       await refreshAdministration();
     }
   }
-  useEffect(() => {
-    let mounted = true;
-    auth.getUser().then(async (u) => {
-      if (!mounted) return;
-      setAuthUser(u);
-      if (u) {
-        try {
-          const p=await bootstrap();
+  useEffect(()=>{
+    let mounted=true;
+    const query=new URLSearchParams(window.location.search);
+    const hash=new URLSearchParams(window.location.hash.replace(/^#/,''));
+    const authMode=query.get('auth');
+    const linkError=query.get('error_description')||hash.get('error_description');
+    if(linkError){
+      setEntryMode('signin');
+      setAuthError(linkError.replace(/\\+/g,' ')+'. You may request a new confirmation or reset link.');
+    }
+    auth.getUser().then(async user=>{
+      if(!mounted)return;
+      setAuthUser(user);
+      if(authMode==='reset'){
+        if(user){
+          setPasswordRecoveryMode(true);
+          setAuthError('');
+        }else{
+          setEntryMode('signin');
+          setForgotPassword(true);
+          setAuthError('The password reset link is expired or invalid. Request a fresh link below.');
+        }
+        if(mounted)setInitialized(true);
+        window.history.replaceState({},'',window.location.pathname);
+        return;
+      }
+      if(user){
+        try{
+          const profile=await bootstrap();
           const draft=readSignupDraft();
-          if(draft&&!p.onboardingComplete&&
-            (!u.email||u.email.toLowerCase()!==draft.email.toLowerCase())){
-            setAuthError('This Google/Apple account uses a different email than the registration form. Sign out and verify the intended email.');
+          if(draft&&!profile.onboardingComplete&&
+            (!user.email||user.email.toLowerCase()!==draft.email.toLowerCase())){
+            setAuthError('Your verified email does not match the pending registration. Use the same email or sign out.');
           }
-          if(draft&&p.onboardingComplete)sessionStorage.removeItem(signupKey);
-          if(p.onboardingComplete&&!p.deletedAt){
-            if(p.role==='System Administrator')await refreshAdministration();
+          if(draft&&profile.onboardingComplete)sessionStorage.removeItem(signupKey);
+          if(profile.onboardingComplete&&!profile.deletedAt){
+            if(profile.role==='System Administrator')await refreshAdministration();
             else await refreshDashboard();
           }
-        } catch (e) { if (mounted) setAuthError(apiMessage(e)); }
+        }catch(error){if(mounted)setAuthError(apiMessage(error));}
+      }else if(authMode==='confirmed'&&!linkError){
+        setEntryMode('signin');
+        setAuthNotice('If your email was confirmed, sign in using your email and password. Otherwise request a new confirmation link.');
       }
-      if (mounted) setInitialized(true);
-    }).catch((e) => { if (mounted) { setAuthError(apiMessage(e)); setInitialized(true); } });
-    return () => { mounted = false; };
-  }, []);
+      if(authMode||linkError){
+        window.history.replaceState({},'',window.location.pathname);
+      }
+      if(mounted)setInitialized(true);
+    }).catch(error=>{
+      if(mounted){
+        setAuthError(apiMessage(error));setEntryMode('signin');setInitialized(true);
+      }
+    });
+    return ()=>{mounted=false;};
+  },[]);
   useEffect(()=>{
     if(!authUser?.userId||!profile?.onboardingComplete||profile.deletedAt)return;
     const interval=window.setInterval(()=>{
@@ -1640,48 +1683,108 @@ export default function App() {
     setOutbox(await listQueuedScans(queueKey));
     await syncOutbox();
   }
-  function openEntry(mode: EntryMode) {
-    setAuthError('');
-    setVerificationSent(false);
-    setAuthRedirecting(false);
+  function openEntry(mode:EntryMode){
+    setAuthError('');setAuthNotice('');setVerificationSent(false);
+    setResetEmailSent(false);setForgotPassword(false);
+    setAuthRedirecting(false);setPasswordVisible(false);
+    setLoginPassword('');setSignupPassword('');setConfirmPassword('');
     setEntryMode(mode);
   }
-  async function beginAuthentication() {
-    if (authRedirecting) return;
+  async function beginAuthentication(){
+    if(authRedirecting)return;
+    setAuthError('');setAuthNotice('');
+    setAuthRedirecting(true);
+    try{
+      if(entryMode==='signup'){
+        const details={
+          name:signupDraft.name.trim(),
+          email:signupDraft.email.trim().toLowerCase(),
+          studentNumber:signupDraft.studentNumber.trim(),
+          requestedRole:signupDraft.requestedRole,
+        };
+        if(details.name.length<2)throw Error('Enter your full name.');
+        if(!emailLooksValid(details.email))throw Error('Enter a valid email address.');
+        if(!strongEnough(signupPassword))
+          throw Error('Use at least 8 characters, including letters and a number.');
+        if(signupPassword!==confirmPassword)throw Error('Passwords do not match.');
+        try{sessionStorage.setItem(signupKey,JSON.stringify(details));}
+        catch{throw Error('Browser storage is unavailable. Open ClassPulse in Safari, Chrome or Edge.');}
+        setSignupDraft(details);
+        const outcome=await auth.signUpWithPassword({
+          name:details.name,email:details.email,password:signupPassword,
+        });
+        setSignupPassword('');setConfirmPassword('');
+        setPendingEmail(details.email);
+        if(outcome.emailSent){
+          setVerificationSent(true);
+        }else if(outcome.signedIn){
+          window.location.assign('/');
+        }
+      }else{
+        if(!emailLooksValid(loginEmail))throw Error('Enter your email address.');
+        if(!loginPassword)throw Error('Enter your password.');
+        await auth.signInWithPassword({email:loginEmail,password:loginPassword});
+        setLoginPassword('');
+        window.location.assign('/');
+      }
+    }catch(error){
+      const message=apiMessage(error);
+      if(/email not confirmed/i.test(message)){
+        setPendingEmail((entryMode==='signup'?signupDraft.email:loginEmail).trim().toLowerCase());
+        setVerificationSent(true);
+      }else{
+        setAuthError(message);
+      }
+    }finally{setAuthRedirecting(false);}
+  }
+  async function beginOAuth(provider:'google'|'apple'){
+    if(authRedirecting)return;
+    setAuthError('');setAuthRedirecting(true);
+    try{
+      // Provider identity is verified by Supabase; onboarding asks the
+      // signed-in person to choose Student or Faculty afterwards.
+      try{sessionStorage.removeItem(signupKey);}catch{}
+      await auth.signInWithRedirect({provider});
+    }catch(error){
+      setAuthError(apiMessage(error));setAuthRedirecting(false);
+    }
+  }
+  async function resendConfirmation(){
+    if(authRedirecting||!pendingEmail)return;
+    setAuthRedirecting(true);setAuthError('');
+    try{
+      await auth.resendConfirmation(pendingEmail);
+      setAuthNotice('Confirmation email requested. Check your inbox and spam folder.');
+    }catch(error){setAuthError(apiMessage(error));}
+    finally{setAuthRedirecting(false);}
+  }
+  async function sendPasswordReset(){
+    if(authRedirecting)return;
+    setAuthError('');setAuthRedirecting(true);
+    try{
+      if(!emailLooksValid(loginEmail))throw Error('Enter a valid email address.');
+      await auth.resetPassword(loginEmail);
+      setResetEmailSent(true);
+    }catch(error){setAuthError(apiMessage(error));}
+    finally{setAuthRedirecting(false);}
+  }
+  async function finishPasswordReset(){
+    if(authRedirecting)return;
     setAuthError('');
-    if (entryMode === 'signup') {
-      const d = {
-        name:signupDraft.name.trim(), email:signupDraft.email.trim().toLowerCase(),
-        studentNumber:signupDraft.studentNumber.trim(), requestedRole:signupDraft.requestedRole
-      };
-      if (d.name.length < 2) return setAuthError('Please enter your full name.');
-      if (!/^[^@ ]+@[^@ .]+\.[^@ ]+$/.test(d.email)) return setAuthError('Enter a valid email address.');
-      try {
-        sessionStorage.setItem(signupKey, JSON.stringify(d));
-        setSignupDraft(d);
-      } catch { return setAuthError('Browser storage is unavailable. Open ClassPulse directly in Safari, Chrome or Edge.'); }
-    } else {
-      try { sessionStorage.removeItem(signupKey); } catch { /* Login should still be available. */ }
+    if(!strongEnough(recoveryPassword)){
+      setAuthError('Use at least 8 characters, including letters and a number.');return;
+    }
+    if(recoveryPassword!==recoveryConfirm){
+      setAuthError('Passwords do not match.');return;
     }
     setAuthRedirecting(true);
-    try {
-      const method=await auth.signInWithRedirect({
-        provider:loginProvider,
-        email:entryMode==='signup'?signupDraft.email:loginEmail,
-      });
-      if(method.emailSent){
-        setVerificationSent(true);
-        setAuthRedirecting(false);
-      }
-    } catch (e) {
-      setAuthRedirecting(false);
-      const message = apiMessage(e);
-      setAuthError(message.includes('storage-unavailable')
-        ? 'Enable browser cookies and storage, or open ClassPulse in Safari, Chrome, or Edge.'
-        : message.includes('navigation-timeout')
-          ? 'The secure sign-in page could not open. Use Safari, Chrome, or Edge to open the app directly.'
-          : message);
-    }
+    try{
+      await auth.updatePassword(recoveryPassword);
+      setRecoveryPassword('');setRecoveryConfirm('');
+      setPasswordRecoveryMode(false);
+      window.location.replace('/');
+    }catch(error){setAuthError(apiMessage(error));}
+    finally{setAuthRedirecting(false);}
   }
   async function completeRegistration() {
     if(profile?.role!=='System Administrator'&&!roleChoiceConfirmed){
@@ -1706,6 +1809,8 @@ export default function App() {
     sessionStorage.removeItem('cp-entry-mode');
     setOutbox([]);setQueueProblem('');
     await auth.signOut();
+    setLoginPassword('');setSignupPassword('');setConfirmPassword('');
+    setRecoveryPassword('');setRecoveryConfirm('');
     setAuthUser(null);
     setRoleChoiceConfirmed(false);
     setProfile(null);
@@ -1780,79 +1885,256 @@ export default function App() {
 
   if (!initialized) return <div className='cp-loading'><Brand/><div className='cp-spinner'/><span>Preparing your campus workspace…</span></div>;
 
-  if (!authUser && entryMode) return <div className='cp-auth-page'>
+  if(passwordRecoveryMode)return <div className='cp-auth-page cp-auth-v2'>
     <aside className='cp-auth-side'>
       <Brand light/>
-      <div><span className='cp-eyebrow light'>WELCOME TO CLASSPULSE</span><LogoMark large/>
-        <h1>Every class.<br/><em>In sync.</em></h1>
-        <p>One academic home for schedules, attendance, consultations, and faculty availability.</p>
-        <span className='cp-auth-side-trust'><ShieldCheck size={18}/> Verified identity · Controlled role access</span>
-      </div>
-      <small>MSU MAIN CAMPUS · CLASS PULSE</small>
+      <div><span className='cp-eyebrow light'>SECURE ACCOUNT RECOVERY</span>
+        <h1>Fresh start.<br/><em>Same campus.</em></h1>
+        <p>Choose a new password for your ClassPulse account.</p></div>
+      <small>MSU MAIN CAMPUS · CLASSPULSE</small>
     </aside>
     <main className='cp-auth-main'>
-      <div className='cp-auth-form'>
-        <button className='cp-auth-back' onClick={() => {setEntryMode(null);setAuthError('');}}>‹ Back to website</button>
-        <div className='cp-auth-tabs' role='tablist' aria-label='Account access'>
-          <button role='tab' aria-selected={entryMode === 'signin'} className={entryMode === 'signin' ? 'selected' : ''} onClick={() => openEntry('signin')}>Sign in</button>
-          <button role='tab' aria-selected={entryMode === 'signup'} className={entryMode === 'signup' ? 'selected' : ''} onClick={() => openEntry('signup')}>Create account</button>
-        </div>
-        <span className='cp-auth-kicker'>{entryMode === 'signup' ? 'NEW CAMPUS PROFILE' : 'WELCOME BACK'}</span>
-        <h2>{entryMode === 'signup' ? 'Create your account.' : 'Sign in to ClassPulse.'}</h2>
-        <p className='cp-auth-subtitle'>{entryMode === 'signup'
-          ? 'Enter your details. Verify with Google, Apple or email, then confirm your role.'
-          : 'Continue with Google, Apple or a secure email link.'}</p>
-        {entryMode === 'signup' && <div className='cp-auth-fields'>
-          <label className='cp-field'><span>Full name *</span><input autoComplete='name' placeholder='Your full name' value={signupDraft.name}
-            onChange={e => setSignupDraft(v=>({...v,name:e.target.value}))}/></label>
-          <label className='cp-field'><span>Email address *</span><input type='email' inputMode='email' autoComplete='email' placeholder='name@example.com' value={signupDraft.email}
-            onChange={e => setSignupDraft(v=>({...v,email:e.target.value}))}/></label>
-          <label className='cp-field'><span>Student / Employee ID (optional)</span><input placeholder='Campus ID' value={signupDraft.studentNumber}
-            onChange={e => setSignupDraft(v=>({...v,studentNumber:e.target.value}))}/></label>
-          <label className='cp-field'><span>Campus role</span><select value={signupDraft.requestedRole}
-            onChange={ev => setSignupDraft(v=>({...v,requestedRole:ev.target.value as Role}))}>
-            <option value='Student'>Student</option><option value='Faculty'>Faculty</option>
-          </select></label>
-          <p className='cp-auth-role-note'><ShieldCheck size={16}/>
-            You will confirm your role after Google, Apple or email verification.</p>
-        </div>}
-        {entryMode==='signin'&&<label className='cp-field cp-auth-login-email'>
-          <span>Email for verification</span>
-          <input type='email' inputMode='email' autoComplete='email'
-            placeholder='student@university.edu' value={loginEmail}
-            onChange={event=>setLoginEmail(event.target.value)}/>
-        </label>}
-        <fieldset className='cp-auth-providers'>
-          <legend>Continue using</legend>
-          <div role='group' aria-label='Authentication provider'>
-            {([['email','Email link'],['google','Google'],['apple','Apple']] as const)
-              .map(([provider,label])=><button type='button' key={provider}
-                className={loginProvider===provider?'selected':''}
-                aria-pressed={loginProvider===provider}
-                onClick={()=>{setLoginProvider(provider);setVerificationSent(false);}}>
-                {label}</button>)}
+      <form className='cp-auth-form cp-auth-form-v2' onSubmit={event=>{
+        event.preventDefault();void finishPasswordReset();
+      }}>
+        <div className='cp-auth-form-icon'><KeyRound size={22}/></div>
+        <span className='cp-auth-kicker'>RESET YOUR PASSWORD</span>
+        <h2>Set a new password</h2>
+        <p className='cp-auth-subtitle'>Your reset link has been verified. This password will replace your previous one.</p>
+        <label className='cp-field'><span>New password</span>
+          <div className='cp-auth-password-wrap'>
+            <input type={passwordVisible?'text':'password'} autoComplete='new-password'
+              minLength={8} value={recoveryPassword}
+              onChange={ev=>setRecoveryPassword(ev.target.value)} required
+              placeholder='8+ characters, letters and a number'/>
+            <button type='button' aria-label={passwordVisible?'Hide password':'Show password'}
+              onClick={()=>setPasswordVisible(v=>!v)}>
+              {passwordVisible?<EyeOff size={17}/>:<Eye size={17}/>}
+            </button>
           </div>
-          {loginProvider!=='email'&&
-            <small>Google and Apple must be enabled in Supabase Authentication.</small>}
-        </fieldset>
-        {verificationSent&&<p className='cp-auth-success' role='status'>
-          Verification email sent. Open the link on this device to finish signing in.
-        </p>}
-        {!backendConfigured&&<p className='cp-auth-error' role='alert'>
-          ClassPulse is being configured for its new Vercel database and sign-in provider.
-          Account access is unavailable until Supabase is connected.
-        </p>}
-        {authError && <div role='alert' className='cp-auth-error'>{authError}</div>}
-        <button disabled={authRedirecting||!backendConfigured} className='cp-button dark full cp-auth-submit' onClick={beginAuthentication}>
-          {authRedirecting ? 'Starting secure sign-in…' : loginProvider==='email'
-            ? 'Send verification link' : 'Continue with '+(loginProvider==='google'?'Google':'Apple')}
-          {authRedirecting ? <span className='cp-spinner small'/> : <ArrowRight size={17}/>}
+        </label>
+        <label className='cp-field'><span>Confirm new password</span>
+          <input type={passwordVisible?'text':'password'} autoComplete='new-password'
+            value={recoveryConfirm} onChange={ev=>setRecoveryConfirm(ev.target.value)}
+            placeholder='Repeat new password' required/>
+        </label>
+        {authError&&<p className='cp-auth-error' role='alert'>{authError}</p>}
+        <button className='cp-button dark full cp-auth-submit'
+          type='submit' disabled={authRedirecting||!strongEnough(recoveryPassword)||
+            recoveryPassword!==recoveryConfirm}>
+          {authRedirecting?'Updating password…':'Save new password'}
+          {authRedirecting?<span className='cp-spinner small'/>:<ArrowRight size={17}/>}
         </button>
-        <p className='cp-auth-hint'><LockKeyhole size={17}/> Secure email verification with Supabase Auth. No app-stored passwords.</p>
-        <div className='cp-auth-switch'>
-          {entryMode === 'signup' ? 'Already registered?' : 'New to ClassPulse?'}
-          <button onClick={() => openEntry(entryMode === 'signup' ? 'signin' : 'signup')}>{entryMode === 'signup' ? 'Sign in' : 'Create account'}</button>
+      </form>
+    </main>
+  </div>;
+  if (!authUser && entryMode) return <div className='cp-auth-page cp-auth-v2'>
+    <aside className='cp-auth-side'>
+      <Brand light/>
+      <div className='cp-auth-visual'>
+        <span className='cp-eyebrow light'>THE CAMPUS, CONNECTED</span>
+        <LogoMark large/>
+        <h1>Every class.<br/><em>In sync.</em></h1>
+        <p>Your academic day, in one secure place — schedules, QR attendance,
+          excuse letters, consultations and updates.</p>
+        <div className='cp-auth-side-benefits'>
+          <span><CalendarDays size={17}/> Your schedule, always organized</span>
+          <span><ScanLine size={17}/> Attendance with verified QR</span>
+          <span><ShieldCheck size={17}/> Private student and faculty access</span>
         </div>
+      </div>
+      <small>CLASSPULSE · MINDANAO STATE UNIVERSITY — MAIN CAMPUS</small>
+    </aside>
+    <main className='cp-auth-main'>
+      <div className='cp-auth-form cp-auth-form-v2'>
+        <button type='button' className='cp-auth-back' onClick={()=>{
+          setEntryMode(null);setAuthError('');setVerificationSent(false);
+          setForgotPassword(false);setResetEmailSent(false);setLoginPassword('');
+          setSignupPassword('');setConfirmPassword('');
+        }}><ArrowLeft size={15}/> Back to website</button>
+        <div className='cp-auth-tabs' role='group' aria-label='Account access'>
+          <button type='button' aria-pressed={entryMode==='signin'}
+            className={entryMode==='signin'?'selected':''}
+            onClick={()=>openEntry('signin')}>Sign in</button>
+          <button type='button' aria-pressed={entryMode==='signup'}
+            className={entryMode==='signup'?'selected':''}
+            onClick={()=>openEntry('signup')}>Create account</button>
+        </div>
+        {verificationSent?
+          <section className='cp-auth-email-confirm' aria-live='polite'>
+            <div className='cp-auth-confirm-icon'><Mail size={26}/></div>
+            <span className='cp-auth-kicker'>VERIFY YOUR EMAIL</span>
+            <h2>Check your inbox</h2>
+            <p>We requested a confirmation link for
+              <strong> {pendingEmail}</strong>. Open the email and follow the link
+              to return to ClassPulse.</p>
+            <div className='cp-auth-confirm-steps'>
+              <span><Check size={15}/> Check Inbox and Spam</span>
+              <span><Check size={15}/> Open the latest confirmation link</span>
+              <span><Check size={15}/> Return here to finish your campus profile</span>
+            </div>
+            {authNotice&&<p className='cp-auth-success' role='status'>{authNotice}</p>}
+            {authError&&<p className='cp-auth-error' role='alert'>{authError}</p>}
+            <button type='button' className='cp-button dark full'
+              disabled={authRedirecting} onClick={()=>void resendConfirmation()}>
+              {authRedirecting?'Sending…':'Resend confirmation email'} <ArrowRight size={16}/>
+            </button>
+            <button type='button' className='cp-auth-text-action'
+              onClick={()=>{setVerificationSent(false);setAuthError('');setAuthNotice('');}}>
+              Use a different email
+            </button>
+          </section>:
+          forgotPassword?
+          <section className='cp-auth-forgot'>
+            <div className='cp-auth-form-icon'><KeyRound size={22}/></div>
+            <span className='cp-auth-kicker'>ACCOUNT RECOVERY</span>
+            <h2>Forgot your password?</h2>
+            <p className='cp-auth-subtitle'>Enter your email address. We’ll send a
+              secure reset link if an account exists.</p>
+            {resetEmailSent?
+              <div className='cp-auth-confirm-steps'>
+                <CheckCircle2 size={19}/>
+                <span>If an account exists for {loginEmail}, its reset instructions
+                  have been sent. Check your inbox and spam folder.</span>
+              </div>:
+              <form onSubmit={event=>{event.preventDefault();void sendPasswordReset();}}>
+                <label className='cp-field'><span>Email address</span>
+                  <input type='email' autoComplete='email' inputMode='email'
+                    placeholder='you@example.com' required value={loginEmail}
+                    onChange={event=>setLoginEmail(event.target.value)}/>
+                </label>
+                <button className='cp-button dark full cp-auth-submit' type='submit'
+                  disabled={authRedirecting||!backendConfigured}>
+                  {authRedirecting?'Sending…':'Send password reset link'}
+                  {authRedirecting?<span className='cp-spinner small'/>:<ArrowRight size={17}/>}
+                </button>
+              </form>}
+            {authError&&<p className='cp-auth-error' role='alert'>{authError}</p>}
+            <button type='button' className='cp-auth-text-action'
+              onClick={()=>{setForgotPassword(false);setResetEmailSent(false);setAuthError('');}}>
+              <ArrowLeft size={14}/> Back to sign in
+            </button>
+          </section>:
+          <>
+            <span className='cp-auth-kicker'>
+              {entryMode==='signup'?'JOIN CLASSPULSE':'WELCOME BACK'}
+            </span>
+            <h2>{entryMode==='signup'?'Create your campus account':'Sign in to ClassPulse'}</h2>
+            <p className='cp-auth-subtitle'>
+              {entryMode==='signup'
+                ?'Your account keeps classes, attendance and academic requests in one place.'
+                :'Enter your email and password to continue your academic day.'}
+            </p>
+            {authNotice&&<p className='cp-auth-success' role='status'>{authNotice}</p>}
+            <form className='cp-auth-credentials-form' onSubmit={event=>{
+              event.preventDefault();void beginAuthentication();
+            }}>
+              {entryMode==='signup'&&<>
+                <label className='cp-field'><span>Full name</span>
+                  <input autoComplete='name' required minLength={2} placeholder='Your full name'
+                    value={signupDraft.name}
+                    onChange={ev=>setSignupDraft(v=>({...v,name:ev.target.value}))}/>
+                </label>
+              </>}
+              <label className='cp-field'><span>Email address</span>
+                <input type='email' autoComplete='email' inputMode='email'
+                  required placeholder='you@example.com'
+                  value={entryMode==='signup'?signupDraft.email:loginEmail}
+                  onChange={ev=>entryMode==='signup'
+                    ?setSignupDraft(v=>({...v,email:ev.target.value}))
+                    :setLoginEmail(ev.target.value)}/>
+              </label>
+              {entryMode==='signup'&&<>
+                <label className='cp-field'><span>Campus ID <small>(optional)</small></span>
+                  <input autoComplete='off' placeholder='Student / employee number'
+                    value={signupDraft.studentNumber}
+                    onChange={ev=>setSignupDraft(v=>({...v,studentNumber:ev.target.value}))}/>
+                </label>
+                <fieldset className='cp-auth-role-choice'>
+                  <legend>Register as</legend>
+                  <div>
+                    {(['Student','Faculty'] as const).map(r=><button
+                      key={r} type='button'
+                      aria-pressed={signupDraft.requestedRole===r}
+                      className={signupDraft.requestedRole===r?'selected':''}
+                      onClick={()=>setSignupDraft(v=>({...v,requestedRole:r}))}>
+                      {r==='Student'?<GraduationCap size={19}/>:<Users size={19}/>}
+                      <span>{r}</span>
+                      {signupDraft.requestedRole===r&&<Check size={15}/>}
+                    </button>)}
+                  </div>
+                </fieldset>
+              </>}
+              <label className='cp-field'><span>Password</span>
+                <div className='cp-auth-password-wrap'>
+                  <input type={passwordVisible?'text':'password'} required
+                    minLength={entryMode==='signup'?8:1}
+                    autoComplete={entryMode==='signup'?'new-password':'current-password'}
+                    placeholder={entryMode==='signup'?'Create a strong password':'Your password'}
+                    value={entryMode==='signup'?signupPassword:loginPassword}
+                    onChange={ev=>entryMode==='signup'
+                      ?setSignupPassword(ev.target.value):setLoginPassword(ev.target.value)}/>
+                  <button type='button' aria-label={passwordVisible?'Hide password':'Show password'}
+                    onClick={()=>setPasswordVisible(v=>!v)}>
+                    {passwordVisible?<EyeOff size={18}/>:<Eye size={18}/>}
+                  </button>
+                </div>
+              </label>
+              {entryMode==='signup'&&<>
+                <div className='cp-auth-password-hint' role='status'>
+                  <span className={signupPassword.length>=8?'passed':''}>
+                    <Check size={13}/> At least 8 characters</span>
+                  <span className={/[A-Za-z]/.test(signupPassword)&&/[0-9]/.test(signupPassword)?'passed':''}>
+                    <Check size={13}/> Letters and a number</span>
+                </div>
+                <label className='cp-field'><span>Confirm password</span>
+                  <input type={passwordVisible?'text':'password'} required
+                    autoComplete='new-password' placeholder='Repeat your password'
+                    value={confirmPassword} onChange={ev=>setConfirmPassword(ev.target.value)}/>
+                </label>
+                {confirmPassword&&signupPassword!==confirmPassword&&
+                  <small className='cp-auth-invalid'>Passwords must match.</small>}
+              </>}
+              {entryMode==='signin'&&<div className='cp-auth-help-row'>
+                <button type='button' onClick={()=>{
+                  setForgotPassword(true);setVerificationSent(false);setAuthError('');
+                  setResetEmailSent(false);setLoginPassword('');
+                }}>Forgot password?</button>
+              </div>}
+              {authError&&<p className='cp-auth-error' role='alert'>{authError}</p>}
+              {!backendConfigured&&<p className='cp-auth-error' role='alert'>
+                Sign-in is unavailable until Supabase configuration is completed.</p>}
+              <button type='submit' className='cp-button dark full cp-auth-submit'
+                disabled={authRedirecting||!backendConfigured||
+                  (entryMode==='signup'&&(!strongEnough(signupPassword)||
+                    signupPassword!==confirmPassword))}>
+                {authRedirecting?'Please wait…':entryMode==='signup'
+                  ?'Create account':'Sign in'}
+                {authRedirecting?<span className='cp-spinner small'/>:<ArrowRight size={17}/>}
+              </button>
+            </form>
+            <div className='cp-auth-divider'><span>or continue with</span></div>
+            <div className='cp-auth-oauth'>
+              <button type='button' disabled={authRedirecting||!backendConfigured}
+                onClick={()=>void beginOAuth('google')}>
+                <span className='cp-google-mark'>G</span> Google
+              </button>
+              <button type='button' disabled={authRedirecting||!backendConfigured}
+                onClick={()=>void beginOAuth('apple')}>
+                <span className='cp-apple-mark'>●</span> Apple
+              </button>
+            </div>
+            <p className='cp-auth-hint'><LockKeyhole size={16}/>
+              Passwords are protected by Supabase Auth. You'll verify your email
+              before entering your ClassPulse workspace.</p>
+            <div className='cp-auth-switch'>
+              {entryMode==='signup'?'Already have an account?':'New to ClassPulse?'}
+              <button type='button' onClick={()=>openEntry(entryMode==='signup'?'signin':'signup')}>
+                {entryMode==='signup'?'Sign in':'Create account'}
+              </button>
+            </div>
+          </>
+        }
       </div>
     </main>
   </div>;

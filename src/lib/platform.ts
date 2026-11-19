@@ -13,42 +13,91 @@ export const supabase:SupabaseClient|null=backendConfigured
     }):null;
 
 function client():SupabaseClient{
-  if(!supabase)throw Error('ClassPulse database and sign-in are not configured. Connect Supabase to the Vercel project.');
+  if(!supabase)throw Error('ClassPulse sign-in is not configured. Connect the Supabase project to Vercel.');
   return supabase;
+}
+const validEmail=(email:string)=>/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim());
+/**
+ * Send confirmation and password recovery links to this app, never to
+ * Supabase's localhost fallback. The origin is the actual Vercel host used
+ * for registration; add your stable app domain and preview domains to the
+ * Supabase Authentication redirect allow-list.
+ */
+export function authCallbackUrl(mode:'confirmed'|'reset'){
+  const configured=(import.meta.env.VITE_AUTH_REDIRECT_URL||'').trim();
+  let base:URL;
+  try{base=new URL(configured||window.location.origin,window.location.origin);}
+  catch{base=new URL(window.location.origin);}
+  if(base.protocol!=='https:'&&base.hostname!=='localhost')throw Error('Secure HTTPS is required for account links.');
+  base.pathname='/';
+  base.search='';
+  base.hash='';
+  base.searchParams.set('auth',mode);
+  return base.toString();
 }
 export const auth={
   async getUser():Promise<{userId:string;email?:string;name?:string}|null>{
     if(!supabase)return null;
-    const {data:{session}}=await supabase.auth.getSession();
+    const {data:{session},error:sessionError}=await supabase.auth.getSession();
+    if(sessionError)throw sessionError;
     if(!session)return null;
     const {data:{user},error}=await supabase.auth.getUser();
     if(error||!user)return null;
     return {userId:user.id,email:user.email,name:user.user_metadata?.full_name||user.user_metadata?.name};
   },
-  async signInWithRedirect(options?:{
-    provider?:'google'|'apple'|'email';email?:string;
-  }):Promise<{emailSent?:boolean}>{
-    const authClient=client();
-    const provider=options?.provider||'email';
-    if(provider==='email'){
-      const email=(options?.email||'').trim().toLowerCase();
-      if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email))throw Error('Enter your email address first.');
-      const {error}=await authClient.auth.signInWithOtp({
-        email,options:{emailRedirectTo:window.location.origin},
-      });
-      if(error)throw error;
-      return {emailSent:true};
-    }
-    const {error}=await authClient.auth.signInWithOAuth({
-      provider,
-      options:{redirectTo:window.location.origin},
+  async signUpWithPassword(values:{email:string;password:string;name:string}){
+    const email=values.email.trim().toLowerCase();
+    if(!validEmail(email))throw Error('Enter a valid email address.');
+    if(values.password.length<8)throw Error('Use a password with at least 8 characters.');
+    const {data,error}=await client().auth.signUp({
+      email,password:values.password,
+      options:{
+        emailRedirectTo:authCallbackUrl('confirmed'),
+        data:{full_name:values.name.trim()},
+      },
     });
     if(error)throw error;
-    return {};
+    return {signedIn:!!data.session,emailSent:!data.session};
+  },
+  async signInWithPassword(values:{email:string;password:string}){
+    const email=values.email.trim().toLowerCase();
+    if(!validEmail(email)||!values.password)throw Error('Enter your email address and password.');
+    const {data,error}=await client().auth.signInWithPassword({email,password:values.password});
+    if(error)throw error;
+    if(!data.session)throw Error('Could not establish an authenticated session.');
+    return true;
+  },
+  async resendConfirmation(email:string){
+    const normalized=email.trim().toLowerCase();
+    if(!validEmail(normalized))throw Error('Enter a valid email address.');
+    const {error}=await client().auth.resend({
+      type:'signup',email:normalized,
+      options:{emailRedirectTo:authCallbackUrl('confirmed')},
+    });
+    if(error)throw error;
+  },
+  async resetPassword(email:string){
+    const normalized=email.trim().toLowerCase();
+    if(!validEmail(normalized))throw Error('Enter a valid email address.');
+    const {error}=await client().auth.resetPasswordForEmail(normalized,{
+      redirectTo:authCallbackUrl('reset'),
+    });
+    if(error)throw error;
+  },
+  async updatePassword(password:string){
+    if(password.length<8)throw Error('Use a password with at least 8 characters.');
+    const {error}=await client().auth.updateUser({password});
+    if(error)throw error;
+  },
+  async signInWithRedirect(options:{provider:'google'|'apple'}){
+    const {error}=await client().auth.signInWithOAuth({
+      provider:options.provider,
+      options:{redirectTo:authCallbackUrl('confirmed')},
+    });
+    if(error)throw error;
   },
   async signOut():Promise<void>{
-    const active=client();
-    const {error}=await active.auth.signOut();
+    const {error}=await client().auth.signOut();
     if(error)throw error;
   }
 };
