@@ -2443,3 +2443,38 @@ textarea:focus-visible {outline:2px solid var(--focus-ring);outline-offset:3px;}
  .cp-feature:hover,.cp-orbit-core:hover,.cp-floating-card:hover {transform:none!important;}
 }
 /* End mobile / color / security interface QA polish */
+
+/* November 2026: accessible typography and mobile class-week refinements */
+html { -webkit-text-size-adjust:100%; }
+input,select,textarea { font-size:max(16px,1em); }
+html[data-density='compact'] { font-size:16px; }
+html[data-density='comfortable'] { font-size:18px; }
+html[data-density='spacious'] { font-size:20px; }
+html[data-density='comfortable'] .cp-content,
+html[data-density='comfortable'] .cp-panel,
+html[data-density='spacious'] .cp-content,
+html[data-density='spacious'] .cp-panel { font-size:inherit; }
+html[data-density='comfortable'] .cp-panel p,
+html[data-density='comfortable'] .cp-panel button,
+html[data-density='comfortable'] .cp-panel td,
+html[data-density='comfortable'] .cp-panel label { font-size:max(15px, .92em); }
+html[data-density='spacious'] .cp-panel p,
+html[data-density='spacious'] .cp-panel button,
+html[data-density='spacious'] .cp-panel td,
+html[data-density='spacious'] .cp-panel label { font-size:max(17px, 1em); }
+:root[data-theme='dark'] .cp-auth-page .cp-button,
+:root[data-theme='dark'] .cp-auth-page button[type='submit'] {
+  background:#dffc79;color:#101723;border:1px solid #e7ffad;
+}
+.cp-deck-card { backface-visibility:hidden; transform-style:preserve-3d; }
+.cp-deck-stage { touch-action:pan-y; }
+@media (max-width: 680px) {
+  .cp-deck-days { display:none!important; }
+  .cp-week-panel { padding:12px 10px; }
+  .cp-deck-stage { min-height:350px; }
+  .cp-deck-bottom { margin-top:4px; }
+  .cp-week-toolbar { margin-bottom:6px; }
+}
+@media (prefers-reduced-motion:reduce) {
+  .cp-deck-card { transition:none!important; animation:none!important; }
+}
