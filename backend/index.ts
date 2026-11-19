@@ -181,89 +181,6 @@ async function roomConflict(room: string, day: string, startTime: string,
 }
 
 
-type ImportRow={preview:Record<string,string>;record:Record<string,unknown>};
-async function validateImport(kind:string,inputRows:unknown[]):Promise<{
- valid:ImportRow[];issues:{row:number;reason:string}[]
-}>{
-  const schema:Record<string,string[]>={
-    rooms:['code','building','capacity','status'],
-    sections:['courseCode','title','section','term','day','startTime','endTime','room','facultyEmail'],
-    enrollments:['studentEmail','courseCode','section','term'],
-  };
-  const fields=schema[kind];
-  const [rooms,sections,profiles,enrollments]=await Promise.all([
-    list<{id:string;code:string;building:string;capacity:number;status:string}>('cp_rooms',240),
-    list<Section>('cp_sections',240),list<Profile>('cp_profiles',240),
-    list<{studentId:string;sectionId:string}>('cp_enrollments',240),
-  ]);
-  const valid:ImportRow[]=[];
-  const issues:{row:number;reason:string}[]=[];
-  const seen=new Set<string>();
-  for(let i=0;i<inputRows.length;i++){
-    const obj=inputRows[i];
-    if(!obj||typeof obj!=='object'||Array.isArray(obj)){
-      issues.push({row:i+2,reason:'Not a CSV object'});continue;
-    }
-    const raw=obj as Record<string,unknown>;
-    if(Object.keys(raw).some(key=>!fields.includes(key))){
-      issues.push({row:i+2,reason:'Unexpected CSV column'});continue;
-    }
-    const row:Record<string,string>={};
-    for(const key of fields)row[key]=text(raw[key],140);
-    let record:Record<string,unknown>|null=null,duplicateKey='';
-    let issue='';
-    if(kind==='rooms'){
-      const code=row.code.toUpperCase(),capacity=Number(row.capacity),status=row.status.toUpperCase();
-      duplicateKey=code;
-      if(!/^[A-Z0-9 -]{2,50}$/.test(code)||row.building.length<2||
-         !Number.isInteger(capacity)||capacity<1||capacity>200||
-         !['AVAILABLE','MAINTENANCE','INACTIVE'].includes(status)){
-        issue='Room code, building, capacity or status invalid';
-      }else if(rooms.some(r=>r.code.toUpperCase()===code))issue='Room already registered';
-      else record={id:'room-'+createHash('sha256').update(code).digest('hex').slice(0,35),
-        code,building:row.building,capacity,status};
-    }else if(kind==='sections'){
-      const faculty=profiles.find(p=>p.role==='Faculty'&&p.email.toLowerCase()===row.facultyEmail.toLowerCase());
-      const courseCode=row.courseCode.toUpperCase();
-      const term=row.term||'Current term';
-      duplicateKey=[courseCode,row.section.toLowerCase(),term.toLowerCase()].join('|');
-      if(!faculty||row.title.length<3||!row.section||!courseCode||
-        !validClassDay(row.day)||!timeValid(row.startTime)||!timeValid(row.endTime)||
-        row.startTime>=row.endTime||!row.room){
-        issue='Invalid subject, verified faculty email, or timetable';
-      }else if(sections.some(s=>!s.archivedAt&&s.courseCode===courseCode&&
-        s.section.toLowerCase()===row.section.toLowerCase()&&s.term.toLowerCase()===term.toLowerCase())){
-        issue='Duplicate active section for term';
-      }else {
-        const other=sections.filter(s=>!s.archivedAt)
-          .concat(valid.filter(v=>v.record.facultyId).map(v=>v.record as unknown as Section));
-        const occupied=other.find(s=>datesOverlap(row.day,s.day)&&
-          timeOverlaps(minutes(row.startTime),minutes(row.endTime),minutes(s.startTime),minutes(s.endTime))&&
-          (s.facultyId===faculty.userId||(s.room.toUpperCase()===row.room.toUpperCase()&&s.term.toLowerCase()===term.toLowerCase())));
-        if(occupied)issue='Overlaps existing '+occupied.courseCode+' class or room';
-        else record={id:randomUUID(),courseCode,title:row.title,section:row.section,term,
-          day:row.day,startTime:row.startTime,endTime:row.endTime,
-          room:row.room,facultyId:faculty.userId,facultyName:faculty.name,
-          joinCode:randomBytes(5).toString('hex').toUpperCase(),status:'ATTENDING'};
-      }
-    }else{
-      const student=profiles.find(p=>p.role==='Student'&&p.email.toLowerCase()===row.studentEmail.toLowerCase());
-      const section=sections.find(s=>!s.archivedAt&&s.courseCode===row.courseCode.toUpperCase()&&
-        s.section.toLowerCase()===row.section.toLowerCase()&&s.term.toLowerCase()===row.term.toLowerCase());
-      if(!student||!section)issue='Verified Student or subject not found';
-      else{
-        duplicateKey=memberId(student.userId,section.id);
-        if(enrollments.some(e=>e.studentId===student.userId&&e.sectionId===section.id))issue='Already enrolled';
-        else record={id:duplicateKey,studentId:student.userId,sectionId:section.id,createdAt:nowIso()};
-      }
-    }
-    if(!issue&&seen.has(duplicateKey))issue='Duplicate within uploaded CSV';
-    if(issue||!record)issues.push({row:i+2,reason:issue||'Invalid row'});
-    else{seen.add(duplicateKey);valid.push({record,preview:row});}
-  }
-  return {valid,issues};
-}
-
 const own = (p: Profile, s: Section) => p.role === 'Faculty' && s.facultyId === p.userId;
 const presentStatus = (m: Meeting, captured: number) => captured > new Date(m.startAt).getTime() + m.lateMinutes * 60000 ? 'LATE' : 'PRESENT';
 const publicSection = (s: Section) => ({
@@ -856,7 +773,7 @@ export const handler = router({
     const p = await me(ctx.user!);
     if(p.role==='System Administrator')return forbid('Use the system-health dashboard');
     const sections = await availableSections(p);
-    const allMeetings = p.role === 'System Administrator' ? [] : await list<Meeting>('cp_sessions');
+    const allMeetings = await list<Meeting>('cp_sessions');
     const meetings = allMeetings.filter((m) => sections.some((s) => s.id === m.sectionId));
     const attendance = p.role === 'Student'
       ? (await list<Attendance>('cp_attendance')).filter((a) => a.studentId === p.userId)
@@ -870,11 +787,9 @@ export const handler = router({
         : [];
     const bookings = p.role === 'Student'
       ? (await list<Booking>('cp_bookings')).filter((b) => b.studentId === p.userId)
-      : p.role === 'Faculty'
-        ? (await list<Booking>('cp_bookings')).filter((b) => false)
-        : [];
+      : [];
     const filteredBookings = bookings;
-    const notices = p.role === 'System Administrator' ? [] : (await list<{ title: string; body: string; createdAt: string }>(noticesTable(p.userId), 30));
+    const notices = await list<{ title: string; body: string; createdAt: string }>(noticesTable(p.userId), 30);
     return json({
       profile: p,
       sections: sections.map(publicSection),
@@ -1061,7 +976,7 @@ export const handler = router({
     const verifiedToken = validateToken(token, meeting);
     const cap = Date.parse(capturedAt);
     const ageMs = Date.now() - cap;
-    const slotStart = verifiedToken ? verifiedToken.slot * 15000 : 0;
+    const slotStart = (verifiedToken?.slot ?? 0) * 15000;
     const validTime = Number.isFinite(cap) && !!verifiedToken
       && cap >= slotStart - 2000 && cap <= slotStart + 18000
       && ageMs >= -30000 && ageMs <= 12 * 60 * 60 * 1000;

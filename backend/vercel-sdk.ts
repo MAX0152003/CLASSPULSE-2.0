@@ -151,7 +151,7 @@ export function router(routes:Record<string,RouterMiddleware[]>){
     try{
       if(!process.env.SUPABASE_URL&&!process.env.VITE_SUPABASE_URL)
         throw Error('Supabase backend environment is not configured');
-      let outcome:Reply|void;
+      let outcome:Reply|void=undefined;
       for(const item of selected.middleware){
         outcome=await item(ctx);
         if(outcome?.__cp)break;
