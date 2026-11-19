@@ -156,7 +156,7 @@ async function apiRequest(method:'GET'|'POST'|'PUT',path:string,body?:unknown){
       :response.status>=500
         ?'ClassPulse backend is temporarily unavailable.'
         :response.status===404
-          ?'ClassPulse API endpoint is missing from this deployment.'
+          ?'ClassPulse API endpoint '+path+' is missing from this deployment.'
           :response.status===401||response.status===403
             ?'The server blocked this request. Check your deployment access.'
             :'The ClassPulse API returned a non-JSON response.';

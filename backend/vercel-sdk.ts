@@ -135,7 +135,15 @@ export function router(routes:Record<string,RouterMiddleware[]>){
   return async(req:VercelRequest,res:VercelResponse)=>{
     res.setHeader('Cache-Control','no-store');
     res.setHeader('X-Content-Type-Options','nosniff');
-    const pathname=new URL(req.url||'/', 'https://classpulse.invalid').pathname;
+    // Vercel's plain Vite file router does not implement Next.js-style
+    // "[...path]" multi-segment catch-alls. vercel.json rewrites every
+    // /api/:path* URL to /api/index?cp_route=:path*, preserving the route here.
+    const rewritten = req.query?.cp_route;
+    const routeTail=Array.isArray(rewritten)?rewritten.join('/'):
+      typeof rewritten==='string'?rewritten:'';
+    const pathname=routeTail
+      ? '/api/'+(routeTail.startsWith('/') ? routeTail.slice(1) : routeTail)
+      : new URL(req.url||'/', 'https://classpulse.invalid').pathname;
     const method=(req.method||'GET').toUpperCase();
     const selected=entries.find(entry=>entry.method===method&&entry.regex.test(pathname));
     if(!selected){res.status(404).json({error:'API route not found'});return;}
