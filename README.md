@@ -1,23 +1,20 @@
 # ClassPulse 2.0
 
-ClassPulse is a React + TypeScript academic platform for class scheduling, anti-proxy QR attendance, academic communication, consultations and digital excuse letters.
+An academic scheduling, anti-proxy dynamic QR attendance, excuse-letter, consultation and communication application for Mindanao State University – Main Campus.
 
-## Source
+## Vercel migration
 
-Complete source exported from an existing AppDeploy app. This repository is a development workspace. Changes here do **not** deploy or modify the hosted application.
+This development branch uses **React/Vite, Vercel Functions, Supabase Auth, Supabase Postgres and private Supabase Storage**. The previous AppDeploy SDK imports have been removed.
 
-## Backend
+**The Vercel project needs a Supabase connection and one SQL schema installation before users can sign in or use academic data.** No demo users or fabricated attendance are included. See [VERCEL_DEPLOYMENT.md](VERCEL_DEPLOYMENT.md) for setup, privacy and security requirements.
 
-The API uses the `@appdeploy/sdk` runtime and needs AppDeploy-provisioned database, storage, authentication, notifications and WebSocket services. A standalone Vite build is not a functional substitute for deployment in that environment.
+- Frontend: `src/App.tsx`, `src/lib/platform.ts`, `src/index.css`
+- API routes: `api/[...path].ts`
+- Academic, QR and authorization logic: `backend/index.ts`
+- Vercel persistence adapter: `backend/vercel-sdk.ts`
+- Database schema: `supabase/schema.sql`
+- Regression checks: `npm run verify:source`
 
-## Setup and security
+## Important
 
-Set `CLASSPULSE_ADMIN_EMAILS` to the initial administrator's verified email(s) in your *backend* environment. Never put real admin emails, credentials, or tokens in Git. Additional administrators can be invited through role-restricted account management.
-
-## Attendance integrity
-
-Keep the existing 12-hour offline QR synchronization rule, captured-at validity checks, and faculty review workflow intact.
-
-## Development
-
-See the `classpulse/ux-system-health` branch for non-deployed interface and administrator-health upgrades.
+Existing AppDeploy account and attendance records **have not been migrated**. The new Supabase backend begins empty. Export and migrate institutional data only with authorization. The existing 12-hour offline QR synchronization rule and server-side verification are preserved. Browser Web Push is not configured; academic notices remain accessible inside ClassPulse. Do not treat a ready Vercel build alone as a verified production release.

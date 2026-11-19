@@ -1,6 +1,7 @@
-import { router, json, error, requireAuth, db, storage, notifications, ws } from '@appdeploy/sdk';
-import type { RouterMiddleware } from '@appdeploy/sdk';
+import { router, json, error, requireAuth, db, storage, ws } from './vercel-sdk.js';
+import type { RouterMiddleware } from './vercel-sdk.js';
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import webpush from 'web-push';
 
 type Role = 'Student' | 'Faculty' | 'System Administrator';
 type Profile = {
@@ -80,10 +81,57 @@ type Booking = { id: string; slotId: string; studentId: string; topic: string; s
 type AttendanceCorrection = { id:string; sectionId:string; attendanceId:string; sessionId:string; studentId:string;
   facultyId:string; previousStatus:string; nextStatus:string; reason:string; timestamp:string };
 
-const ADMIN_EMAILS = [...new Set([
-  ...(process.env.CLASSPULSE_ADMIN_EMAILS || '').split(','),
-].map((s) => s.trim().toLowerCase()).filter(Boolean))];
+const ADMIN_EMAILS = [...new Set(
+  (process.env.CLASSPULSE_ADMIN_EMAILS || '').split(',')
+    .map(s=>s.trim().toLowerCase()).filter(Boolean)
+)];
 type AdminInvite={id:string;email:string;status:'PENDING'|'ACCEPTED'|'REVOKED';createdBy:string;createdAt:string;expiresAt:string;acceptedAt?:string;previousRole?:Role};
+type UserInvite={id:string;email:string;role:'Student'|'Faculty';status:'PENDING'|'ACCEPTED'|'REVOKED';createdBy:string;createdAt:string;expiresAt:string;acceptedAt?:string};
+type SystemIssue={id:string;kind:'crash'|'network'|'sync'|'account'|'other';severity:'LOW'|'MEDIUM'|'HIGH';message:string;reporterId:string;createdAt:string;status:'OPEN'|'RESOLVED';resolvedAt?:string};
+type BrowserPushRecord={id:string;userId:string;subscription:{
+  endpoint:string;expirationTime?:number|null;keys:{p256dh:string;auth:string}};
+  createdAt:string;updatedAt:string};
+const pushRecordId=(userId:string,endpoint:string)=>
+  'push-'+createHash('sha256').update(userId+':'+endpoint).digest('hex').slice(0,40);
+function validBrowserPushEndpoint(endpoint:string){
+  try{
+    const u=new URL(endpoint);
+    if(u.protocol!=='https:'||u.username||u.password||u.port||u.hash)return false;
+    const host=u.hostname.toLowerCase();
+    return host==='fcm.googleapis.com'||
+      host==='push.services.mozilla.com'||
+      host.endsWith('.push.services.mozilla.com')||
+      host==='web.push.apple.com'||host.endsWith('.push.apple.com')||
+      host.endsWith('.notify.windows.com');
+  }catch{return false;}
+}
+function configureWebPush(){
+  const publicKey=(process.env.CLASSPULSE_VAPID_PUBLIC_KEY||'').trim();
+  const privateKey=(process.env.CLASSPULSE_VAPID_PRIVATE_KEY||'').trim();
+  const subject=(process.env.CLASSPULSE_VAPID_SUBJECT||'').trim();
+  if(!publicKey||!privateKey||!subject)return false;
+  webpush.setVapidDetails(subject,publicKey,privateKey);
+  return true;
+}
+async function sendBrowserPush(userId:string,title:string,body:string,kind:string){
+  if(!configureWebPush())return;
+  const records=(await list<BrowserPushRecord>('cp_push_subscriptions',500))
+    .filter(s=>s.userId===userId).slice(0,6);
+  const payload=JSON.stringify({title,body,kind,url:'/?view=Notifications'});
+  await Promise.allSettled(records.map(async(record)=>{
+    try{
+      await webpush.sendNotification(record.subscription,payload,
+        {TTL:kind==='class'?86400:14400,urgency:kind==='class'?'high':'normal'});
+    }catch(e){
+      const status=Number((e as {statusCode?:number})?.statusCode);
+      if(status===404||status===410){
+        try{await db.tx.delete('cp_push_subscriptions',[record.id]);}catch{}
+      }
+    }
+  }));
+}
+
+const userInviteId=(email:string)=>'ui-'+createHash('sha256').update(email.trim().toLowerCase()).digest('hex').slice(0,42);
 function adminInviteId(email:string){return 'ai-'+createHash('sha256').update(email.toLowerCase()).digest('hex').slice(0,42);}
 async function isAdminEmail(email?:string) {
   if(!email)return false;
@@ -177,89 +225,6 @@ async function roomConflict(room: string, day: string, startTime: string,
 }
 
 
-type ImportRow={preview:Record<string,string>;record:Record<string,unknown>};
-async function validateImport(kind:string,inputRows:unknown[]):Promise<{
- valid:ImportRow[];issues:{row:number;reason:string}[]
-}>{
-  const schema:Record<string,string[]>={
-    rooms:['code','building','capacity','status'],
-    sections:['courseCode','title','section','term','day','startTime','endTime','room','facultyEmail'],
-    enrollments:['studentEmail','courseCode','section','term'],
-  };
-  const fields=schema[kind];
-  const [rooms,sections,profiles,enrollments]=await Promise.all([
-    list<{id:string;code:string;building:string;capacity:number;status:string}>('cp_rooms',240),
-    list<Section>('cp_sections',240),list<Profile>('cp_profiles',240),
-    list<{studentId:string;sectionId:string}>('cp_enrollments',240),
-  ]);
-  const valid:ImportRow[]=[];
-  const issues:{row:number;reason:string}[]=[];
-  const seen=new Set<string>();
-  for(let i=0;i<inputRows.length;i++){
-    const obj=inputRows[i];
-    if(!obj||typeof obj!=='object'||Array.isArray(obj)){
-      issues.push({row:i+2,reason:'Not a CSV object'});continue;
-    }
-    const raw=obj as Record<string,unknown>;
-    if(Object.keys(raw).some(key=>!fields.includes(key))){
-      issues.push({row:i+2,reason:'Unexpected CSV column'});continue;
-    }
-    const row:Record<string,string>={};
-    for(const key of fields)row[key]=text(raw[key],140);
-    let record:Record<string,unknown>|null=null,duplicateKey='';
-    let issue='';
-    if(kind==='rooms'){
-      const code=row.code.toUpperCase(),capacity=Number(row.capacity),status=row.status.toUpperCase();
-      duplicateKey=code;
-      if(!/^[A-Z0-9 -]{2,50}$/.test(code)||row.building.length<2||
-         !Number.isInteger(capacity)||capacity<1||capacity>200||
-         !['AVAILABLE','MAINTENANCE','INACTIVE'].includes(status)){
-        issue='Room code, building, capacity or status invalid';
-      }else if(rooms.some(r=>r.code.toUpperCase()===code))issue='Room already registered';
-      else record={id:'room-'+createHash('sha256').update(code).digest('hex').slice(0,35),
-        code,building:row.building,capacity,status};
-    }else if(kind==='sections'){
-      const faculty=profiles.find(p=>p.role==='Faculty'&&p.email.toLowerCase()===row.facultyEmail.toLowerCase());
-      const courseCode=row.courseCode.toUpperCase();
-      const term=row.term||'Current term';
-      duplicateKey=[courseCode,row.section.toLowerCase(),term.toLowerCase()].join('|');
-      if(!faculty||row.title.length<3||!row.section||!courseCode||
-        !validClassDay(row.day)||!timeValid(row.startTime)||!timeValid(row.endTime)||
-        row.startTime>=row.endTime||!row.room){
-        issue='Invalid subject, verified faculty email, or timetable';
-      }else if(sections.some(s=>!s.archivedAt&&s.courseCode===courseCode&&
-        s.section.toLowerCase()===row.section.toLowerCase()&&s.term.toLowerCase()===term.toLowerCase())){
-        issue='Duplicate active section for term';
-      }else {
-        const other=sections.filter(s=>!s.archivedAt)
-          .concat(valid.filter(v=>v.record.facultyId).map(v=>v.record as unknown as Section));
-        const occupied=other.find(s=>datesOverlap(row.day,s.day)&&
-          timeOverlaps(minutes(row.startTime),minutes(row.endTime),minutes(s.startTime),minutes(s.endTime))&&
-          (s.facultyId===faculty.userId||(s.room.toUpperCase()===row.room.toUpperCase()&&s.term.toLowerCase()===term.toLowerCase())));
-        if(occupied)issue='Overlaps existing '+occupied.courseCode+' class or room';
-        else record={id:randomUUID(),courseCode,title:row.title,section:row.section,term,
-          day:row.day,startTime:row.startTime,endTime:row.endTime,
-          room:row.room,facultyId:faculty.userId,facultyName:faculty.name,
-          joinCode:randomBytes(5).toString('hex').toUpperCase(),status:'ATTENDING'};
-      }
-    }else{
-      const student=profiles.find(p=>p.role==='Student'&&p.email.toLowerCase()===row.studentEmail.toLowerCase());
-      const section=sections.find(s=>!s.archivedAt&&s.courseCode===row.courseCode.toUpperCase()&&
-        s.section.toLowerCase()===row.section.toLowerCase()&&s.term.toLowerCase()===row.term.toLowerCase());
-      if(!student||!section)issue='Verified Student or subject not found';
-      else{
-        duplicateKey=memberId(student.userId,section.id);
-        if(enrollments.some(e=>e.studentId===student.userId&&e.sectionId===section.id))issue='Already enrolled';
-        else record={id:duplicateKey,studentId:student.userId,sectionId:section.id,createdAt:nowIso()};
-      }
-    }
-    if(!issue&&seen.has(duplicateKey))issue='Duplicate within uploaded CSV';
-    if(issue||!record)issues.push({row:i+2,reason:issue||'Invalid row'});
-    else{seen.add(duplicateKey);valid.push({record,preview:row});}
-  }
-  return {valid,issues};
-}
-
 const own = (p: Profile, s: Section) => p.role === 'Faculty' && s.facultyId === p.userId;
 const presentStatus = (m: Meeting, captured: number) => captured > new Date(m.startAt).getTime() + m.lateMinutes * 60000 ? 'LATE' : 'PRESENT';
 const publicSection = (s: Section) => ({
@@ -330,9 +295,9 @@ async function audit(actorId: string, actionType: string, targetType: string, ta
 async function notify(userId: string, title: string, body: string, kind: string) {
   await db.add(noticesTable(userId), [{ title, body, kind, createdAt: nowIso(), read: false }]);
   try {
-    await notifications.send({ userIds: [userId], notification: { title, body, url: '/' }, data: { kind } });
+    await sendBrowserPush(userId,title,body,kind);
   } catch {
-    // Persisted in-app notice remains available if a device has no push subscription.
+    // Persisted in-app notice is still available when push delivery is unavailable.
   }
 }
 async function sectionMembers(sectionId: string) {
@@ -421,7 +386,25 @@ export const handler = router({
   'GET /api/bootstrap': [requireAuth(), async (ctx) => {
     const existing=await get<Profile>('cp_profiles',ctx.user!.userId);
     if(existing?.deletedAt)return json({profile:existing,accountDeleted:true,adminConfigured:ADMIN_EMAILS.length>0});
-    const p = await me(ctx.user!);
+    let p=await me(ctx.user!);
+    // The Student/Faculty selection was made at account creation and carried
+    // in verified Supabase Auth user metadata. Never make users select it again.
+    const savedRole=ctx.user!.signupRole;
+    if(!p.onboardingComplete&&p.role!=='System Administrator'&&savedRole){
+      const registeredName=(ctx.user!.name||'').trim();
+      if(registeredName.length>=2){
+        await patch('cp_profiles',p.userId,{
+          name:registeredName.slice(0,90),
+          studentNumber:(ctx.user!.studentNumber||'').slice(0,40),
+          role:savedRole,roleRequest:'',onboardingComplete:true,
+        });
+        await audit(p.userId,'COMPLETE_REGISTRATION_'+savedRole.toUpperCase(),
+          'Profile',p.userId,'system');
+        p={...p,name:registeredName.slice(0,90),
+          studentNumber:(ctx.user!.studentNumber||'').slice(0,40),
+          role:savedRole,roleRequest:'',onboardingComplete:true};
+      }
+    }
     return json({
       profile: p,
       adminConfigured: ADMIN_EMAILS.length > 0,
@@ -433,13 +416,19 @@ export const handler = router({
     const body = input(ctx.body);
     const name = text(body.name, 90);
     const studentNumber = text(body.studentNumber, 40);
-    const requestedRole = text(body.requestedRole, 36);
+    const requestedRole=ctx.user!.signupRole||text(body.requestedRole,36);
     if (name.length < 2) return error('Enter your full name to complete registration', 400);
     if (!['Student','Faculty'].includes(requestedRole) &&
       !(requestedRole==='System Administrator'&&p.role==='System Administrator')){
       return error('Choose Student or Faculty. Administrator accounts require an invitation.',400);
     }
     if (p.onboardingComplete) return error('The account is already registered. Use Profile to edit your information.', 409);
+    const invite=await get<UserInvite>('cp_user_invites',userInviteId(p.email));
+    if(invite&&invite.email===p.email.toLowerCase()&&invite.status==='PENDING'&&
+       Date.parse(invite.expiresAt)>Date.now()){
+      if(requestedRole!==invite.role)return error('Your invitation specifies '+invite.role,403);
+      await patch('cp_user_invites',invite.id,{status:'ACCEPTED',acceptedAt:nowIso()});
+    }
     const role: Role = p.role === 'System Administrator' ? 'System Administrator'
       : requestedRole === 'Faculty' ? 'Faculty' : 'Student';
     const roleRequest = '';
@@ -558,6 +547,41 @@ export const handler = router({
     await audit(ctx.user!.userId,'REVOKE_ADMIN_INVITE','Profile',id,'system');
     return json({ok:true});
   }],
+  'GET /api/admin/user-invites': [requireAuth(),adminGuard,async()=>{
+    const invites=await list<UserInvite>('cp_user_invites',160);
+    return json({invites:invites.sort((a,b)=>b.createdAt.localeCompare(a.createdAt))});
+  }],
+  'POST /api/admin/user-invites': [requireAuth(),adminGuard,async(ctx)=>{
+    const body=input(ctx.body);
+    const email=text(body.email,180).toLowerCase();
+    const role=text(body.role,28);
+    if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email))return error('Enter a valid email',400);
+    if(role!=='Student'&&role!=='Faculty')return error('Invite a Student or Faculty',400);
+    const id=userInviteId(email),existing=await get<UserInvite>('cp_user_invites',id);
+    if(existing?.status==='ACCEPTED')return error('Account already accepted invitation',409);
+    const invite:UserInvite={id,email,role,status:'PENDING',createdBy:ctx.user!.userId,
+      createdAt:nowIso(),expiresAt:new Date(Date.now()+7*86400000).toISOString()};
+    const ok=existing?await patch('cp_user_invites',id,invite):await add('cp_user_invites',invite);
+    if(!ok)return error('Could not save invitation',409);
+    await audit(ctx.user!.userId,'INVITE_USER','Profile',id,'system');
+    return json({ok:true,invite:{email,role,expiresAt:invite.expiresAt},
+      note:'Send the sign-in link; the identity provider verifies the invited email.'});
+  }],
+  'POST /api/admin/user-invites/revoke': [requireAuth(),adminGuard,async(ctx)=>{
+    const email=text(input(ctx.body).email,180).toLowerCase();
+    const invite=await get<UserInvite>('cp_user_invites',userInviteId(email));
+    if(!invite||invite.email!==email)return error('Invitation not found',404);
+    if(invite.status==='ACCEPTED')return error('Registered account must be managed separately',409);
+    if(!await patch('cp_user_invites',invite.id,{status:'REVOKED'}))return error('Refresh and retry',409);
+    await audit(ctx.user!.userId,'REVOKE_USER_INVITE','Profile',invite.id,'system');
+    return json({ok:true});
+  }],
+  'GET /api/account/invite': [requireAuth(),async(ctx)=>{
+    const email=ctx.user?.email?.trim().toLowerCase()||'';
+    const invite=await get<UserInvite>('cp_user_invites',userInviteId(email));
+    return json({invite:invite&&invite.email===email&&invite.status==='PENDING'&&
+      Date.parse(invite.expiresAt)>Date.now()?{role:invite.role}:null});
+  }],
   'GET /api/admin/users': [requireAuth(), adminGuard, async (ctx) => {
     const profiles = (await list<Profile>('cp_profiles')).filter(p=>!p.deletedAt);
     await audit(ctx.user!.userId, 'VIEW_ROLE_DIRECTORY', 'ProfileDirectory', 'all', 'system');
@@ -570,9 +594,10 @@ export const handler = router({
     const body = input(ctx.body);
     const userId = text(body.userId, 90);
     const role = text(body.role, 36);
-    if (!['Student', 'Faculty'].includes(role) || !userId) return error('Choose a valid user and role', 400);
+    if(role!=='Faculty'||!userId)return error('Only Faculty approvals are supported',400);
     const target = await get<Profile>('cp_profiles', userId);
-    if (!target || ADMIN_EMAILS.includes(target.email.toLowerCase())) return error('The account cannot be reassigned', 403);
+    if(!target||target.deletedAt||await isAdminEmail(target.email))
+      return error('The account cannot be reassigned',403);
     await patch('cp_profiles', userId, { role, roleRequest: '' });
     await audit(ctx.user!.userId, 'APPROVE_ROLE', 'Profile', userId, 'system');
     await notify(userId, 'Account role updated', 'Your role is now ' + role + '.', 'role');
@@ -727,34 +752,6 @@ export const handler = router({
       corrections:allCorrections.filter(c=>c.sectionId===s.id).sort((x,y)=>y.timestamp.localeCompare(x.timestamp)).slice(0,100)});
   }],
 
-  'POST /api/admin/section': [requireAuth(), adminGuard, async (ctx) => {
-    const body = input(ctx.body);
-    const facultyId = text(body.facultyId, 90);
-    const faculty = await get<Profile>('cp_profiles', facultyId);
-    if (!faculty || faculty.role !== 'Faculty') return error('Select a registered Faculty account', 400);
-    const courseCode = text(body.courseCode, 24).toUpperCase();
-    const title = text(body.title, 120);
-    const section = text(body.section, 40);
-    const day = text(body.day, 16);
-    const startTime = text(body.startTime, 5);
-    const endTime = text(body.endTime, 5);
-    const room = text(body.room, 60);
-    if (!courseCode || !title || !section || !validClassDay(day)
-      || !timeValid(startTime) || !timeValid(endTime) || startTime >= endTime) return error('Fill out a valid class schedule', 400);
-    const term = text(body.term, 32) || 'Current term';
-    const facultyClash = await ownTeachingConflict(facultyId,day,startTime,endTime);
-    if (facultyClash) return error('Assigned faculty has an overlapping '+facultyClash.courseCode+' class',409);
-    const roomClash = await roomConflict(room,day,startTime,endTime,term);
-    if (roomClash) return error('Room is booked by '+roomClash.courseCode+' on '+roomClash.day,409);
-    const s: Section = {
-      id: randomUUID(), courseCode, title, section, term, day,
-      startTime, endTime, room, facultyId, facultyName: faculty.name, status: 'ATTENDING',
-      joinCode: randomBytes(4).toString('hex').toUpperCase(),
-    };
-    await add('cp_sections', s);
-    await audit(ctx.user!.userId, 'CREATE_SECTION', 'CourseSection', s.id, 'system');
-    return json({ ok: true, section: s });
-  }],
   'GET /api/sections/:id/details': [requireAuth(), async (ctx) => {
     const p=await me(ctx.user!);
     const section=await get<Section>('cp_sections',ctx.params.id);
@@ -810,6 +807,7 @@ export const handler = router({
   }],
   'GET /api/sections': [requireAuth(), async (ctx) => {
     const p = await me(ctx.user!);
+    if(p.role==='System Administrator')return forbid('Administrators do not manage academic sections');
     const sections = await availableSections(p);
     const joined = p.role === 'Student' ? await mySectionIds(p.userId) : [];
     return json({
@@ -835,8 +833,9 @@ export const handler = router({
   }],
   'GET /api/dashboard': [requireAuth(), async (ctx) => {
     const p = await me(ctx.user!);
+    if(p.role==='System Administrator')return forbid('Use the system-health dashboard');
     const sections = await availableSections(p);
-    const allMeetings = p.role === 'System Administrator' ? [] : await list<Meeting>('cp_sessions');
+    const allMeetings = await list<Meeting>('cp_sessions');
     const meetings = allMeetings.filter((m) => sections.some((s) => s.id === m.sectionId));
     const attendance = p.role === 'Student'
       ? (await list<Attendance>('cp_attendance')).filter((a) => a.studentId === p.userId)
@@ -850,11 +849,9 @@ export const handler = router({
         : [];
     const bookings = p.role === 'Student'
       ? (await list<Booking>('cp_bookings')).filter((b) => b.studentId === p.userId)
-      : p.role === 'Faculty'
-        ? (await list<Booking>('cp_bookings')).filter((b) => false)
-        : [];
+      : [];
     const filteredBookings = bookings;
-    const notices = p.role === 'System Administrator' ? [] : (await list<{ title: string; body: string; createdAt: string }>(noticesTable(p.userId), 30));
+    const notices = await list<{ title: string; body: string; createdAt: string }>(noticesTable(p.userId), 30);
     return json({
       profile: p,
       sections: sections.map(publicSection),
@@ -925,8 +922,14 @@ export const handler = router({
     const update = { sectionId: s.id, facultyId: p.userId, type: status, message: text(body.message, 300), room, publishedAt: nowIso() };
     await db.add('cp_updates', [update]);
     await audit(p.userId, 'CLASS_STATUS_UPDATED', 'CourseSection', s.id);
-    for (const student of await sectionMembers(s.id)) {
-      await notify(student.studentId, s.courseCode + ' · ' + status, update.message || 'Class status or room has changed.', 'class');
+    const members=await sectionMembers(s.id);
+    const announcement=update.message || (status==='ROOM CHANGED'
+      ?'Please check the updated room: '+room : 'Class status has changed.');
+    // Notify in small parallel batches to reduce delivery delay without
+    // flooding Supabase or claiming a guaranteed push-delivery time.
+    for(let offset=0;offset<members.length;offset+=12){
+      await Promise.allSettled(members.slice(offset,offset+12).map(student=>
+        notify(student.studentId,s.courseCode+' · '+status,announcement,'class')));
     }
     await publishFacultyLive(p.userId,{kind:'class',updatedAt:nowIso()});
     return json({ ok: true });
@@ -997,8 +1000,19 @@ export const handler = router({
     if (Date.now() < start - 30 * 60000 || Date.now() > end + 30 * 60000) {
       return error('This QR session opens within 30 minutes of the scheduled class time.', 409);
     }
-    const old = (await list<Meeting>('cp_sessions')).find((m) => m.sectionId === sectionId && m.meetingDate === date);
-    if (old) return error('A QR-enabled session already exists for this class today', 409);
+    // One meeting can be displayed repeatedly; reopening a closed meeting keeps
+    // its original attendance IDs, avoiding duplicate daily absence records.
+    const old = (await list<Meeting>('cp_sessions')).find((m)=>
+      m.sectionId===sectionId&&m.meetingDate===date);
+    if(old){
+      if(old.status==='CLOSED'){
+        const reopened=await patch('cp_sessions',old.id,{status:'OPEN'},{status:'CLOSED'});
+        if(!reopened)return error('Session changed. Refresh and retry.',409);
+        await audit(p.userId,'REOPEN_QR_SESSION','ClassSession',old.id);
+      }
+      await publishFacultyLive(p.userId,{kind:'session',updatedAt:nowIso()});
+      return json({ok:true,reused:true,meeting:publicMeeting({...old,status:'OPEN'})});
+    }
     const meeting = await openSession(section, date);
     if (!(await add('cp_sessions', meeting))) return error('Unable to create session', 500);
     await audit(p.userId, 'OPEN_QR_SESSION', 'ClassSession', meeting.id);
@@ -1041,36 +1055,61 @@ export const handler = router({
     const verifiedToken = validateToken(token, meeting);
     const cap = Date.parse(capturedAt);
     const ageMs = Date.now() - cap;
-    const slotStart = verifiedToken ? verifiedToken.slot * 15000 : 0;
+    const slotStart = (verifiedToken?.slot ?? 0) * 15000;
     const validTime = Number.isFinite(cap) && !!verifiedToken
       && cap >= slotStart - 2000 && cap <= slotStart + 18000
       && ageMs >= -30000 && ageMs <= 12 * 60 * 60 * 1000;
-    const reason = !membership ? 'NOT_ENROLLED'
-      : !verifiedToken ? 'INVALID_SIGNATURE'
-        : !validTime ? 'TIMESTAMP_OR_SYNC_WINDOW_INVALID'
-          : 'VALID_TOKEN';
+    const reason = !verifiedToken ? 'INVALID_SIGNATURE'
+      : !validTime ? 'TIMESTAMP_OR_SYNC_WINDOW_INVALID'
+        : 'VALID_TOKEN';
     await db.add('cp_verification', [{
       sessionId: meeting.id, studentId: p.userId, clientScanId,
       capturedAt, receivedAt, result: reason === 'VALID_TOKEN' ? 'TOKEN_VALID' : 'REJECTED',
       integrityFlag: reason !== 'VALID_TOKEN', reason,
     }]);
     if (reason !== 'VALID_TOKEN') return error('Scan rejected: ' + reason.replace(/_/g, ' ').toLowerCase(), 422);
+    const section=await get<Section>('cp_sections',meeting.sectionId);
+    if(!section||section.archivedAt)return error('This QR belongs to an inactive section',409);
+    if(!p.onboardingComplete)return error('Complete your student profile before scanning QR',403);
+    const autoEnrolled=!membership;
     const id = attendanceId(p.userId, meeting.id);
     const old = await get<Attendance>('cp_attendance', id);
     if (old) return json({ ok: true, duplicate: true, attendance: old });
     // Delayed submissions are held for faculty review because the phone clock is not trusted proof.
-    const requiresReview = ageMs > 90000 || meeting.status === 'CLOSED';
+    const requiresReview = autoEnrolled || ageMs > 90000 || meeting.status === 'CLOSED';
     const record: Attendance = {
       id, sessionId: meeting.id, sectionId: meeting.sectionId, studentId: p.userId,
       academicStatus: requiresReview ? 'PENDING REVIEW' : presentStatus(meeting, cap),
       verificationStatus: requiresReview ? 'PENDING_REVIEW' : 'ACCEPTED',
-      capturedAt, receivedAt, clientScanId, reviewReason: requiresReview ? 'Offline/delayed capture requires faculty confirmation' : '',
+      capturedAt, receivedAt, clientScanId,
+      reviewReason:autoEnrolled?'First QR enrollment: faculty photo verification required':
+        requiresReview?'Offline/delayed capture requires faculty confirmation':'',
       updatedAt: nowIso(),
     };
-    const saved = await add('cp_attendance', record);
-    if (!saved) return error('A scan for this session is already recorded', 409);
+    if(autoEnrolled){
+      // A valid signed QR can join the section. Enrollment and attendance must
+      // commit atomically; invalid/expired QR never creates a class membership.
+      const enrollment={id:memberId(p.userId,meeting.sectionId),
+        studentId:p.userId,sectionId:meeting.sectionId,createdAt:receivedAt};
+      try{
+        await db.transact([
+          db.tx.add('cp_enrollments',[enrollment]),
+          db.tx.add('cp_attendance',[record]),
+        ]);
+      }catch{
+        const previous=await get<Attendance>('cp_attendance',id);
+        if(previous)return json({ok:true,duplicate:true,attendance:previous,autoEnrolled:false});
+        return error('Could not enroll and record attendance together. Retry with a fresh QR.',409);
+      }
+      await audit(p.userId,'AUTO_ENROLL_VALID_QR','CourseSection',meeting.sectionId);
+      await notify(meeting.facultyId,'New student QR enrollment',
+        section.courseCode+': '+p.name+' joined by scanning. Verify their photo and attendance.', 'attendance');
+    }else{
+      const saved=await add('cp_attendance',record);
+      if(!saved)return error('A scan for this session is already recorded',409);
+    }
     await audit(p.userId, 'SUBMIT_QR_SCAN', 'ClassSession', meeting.id);
-    return json({ ok: true, attendance: record, review: requiresReview });
+    return json({ ok:true, attendance:record, review:requiresReview, autoEnrolled });
   }],
   'GET /api/attendance': [requireAuth(), async (ctx) => {
     const p = await me(ctx.user!);
@@ -1106,25 +1145,37 @@ export const handler = router({
     const detail = await sessionAccess(p, sessionId);
     if (!detail || !detail.faculty) return forbid();
     const id = attendanceId(studentId, sessionId);
+    const enrolled=await get('cp_enrollments',memberId(studentId,detail.section.id));
+    if(!enrolled)return forbid('Only students enrolled in your subject can receive manual attendance');
+    const student=await get<Profile>('cp_profiles',studentId);
+    if(!student||student.deletedAt||student.role!=='Student')return forbid('Inactive or invalid student');
     const before = await get<Attendance>('cp_attendance', id);
-    if (!before) return error('Attendance record does not exist', 404);
-    const verified = status !== 'ABSENT' && before.verificationStatus === 'PENDING_REVIEW' ? 'FACULTY_APPROVED' : 'FACULTY_CORRECTED';
+    const verified = before&&status !== 'ABSENT'&&before.verificationStatus==='PENDING_REVIEW'
+      ?'FACULTY_APPROVED':'FACULTY_CORRECTED';
     const changedAt=nowIso();
     const correction:AttendanceCorrection={
       id:randomUUID(),sectionId:detail.section.id,attendanceId:id,sessionId,studentId,
-      facultyId:p.userId,previousStatus:before.academicStatus,nextStatus:status,reason,timestamp:changedAt,
+      facultyId:p.userId,previousStatus:before?.academicStatus||'UNRECORDED',nextStatus:status,
+      reason,timestamp:changedAt,
     };
+    const operation=before
+      ?db.tx.update('cp_attendance',[{id,record:{
+        academicStatus:status,verificationStatus:verified,reviewReason:reason,updatedAt:changedAt,
+      },if:{updatedAt:before.updatedAt}}],{patch:true})
+      :db.tx.add('cp_attendance',[{
+        id,sessionId,sectionId:detail.section.id,studentId,
+        academicStatus:status,verificationStatus:'FACULTY_CORRECTED',
+        capturedAt:'',receivedAt:changedAt,clientScanId:'',
+        reviewReason:reason,updatedAt:changedAt,
+      }]);
     try{
-      await db.transact([
-        db.tx.update('cp_attendance',[{id,record:{
-          academicStatus:status,verificationStatus:verified,reviewReason:reason,updatedAt:changedAt,
-        },if:{updatedAt:before.updatedAt}}],{patch:true}),
-        db.tx.add('cp_attendance_corrections',[correction]),
-      ]);
-    }catch{return error('Attendance changed while you were reviewing it. Refresh and retry.',409);}
-    await audit(p.userId, 'REVIEW_ATTENDANCE_' + before.academicStatus + '_TO_' + status, 'AttendanceRecord', id);
-    await notify(studentId, 'Attendance record reviewed', detail.section.courseCode + ': ' + status + '. Reason: ' + reason, 'attendance');
-    return json({ ok: true });
+      await db.transact([operation,db.tx.add('cp_attendance_corrections',[correction])]);
+    }catch{return error('Attendance changed while you were editing. Refresh and retry.',409);}
+    await audit(p.userId,(before?'REVIEW_ATTENDANCE_':'MANUAL_ATTENDANCE_')+
+      (before?.academicStatus||'UNRECORDED')+'_TO_'+status,'AttendanceRecord',id);
+    await notify(studentId,'Attendance '+(before?'corrected':'recorded'),
+      detail.section.courseCode+': '+status+'. Reason: '+reason,'attendance');
+    return json({ok:true,manual:!before});
   }],
   'POST /api/sessions/:id/finalize': [requireAuth(), async (ctx) => {
     const p = await me(ctx.user!);
@@ -1412,6 +1463,44 @@ export const handler = router({
     await notify(booking.studentId, 'Consultation ' + status.toLowerCase(), slot.facultyName + ': ' + (decisionReason || 'Booking status updated.'), 'consultation');
     return json({ ok: true });
   }],
+  'GET /api/push/config': [requireAuth(),async(ctx)=>{
+    const p=await me(ctx.user!);
+    return json({enabled:p.role==='Student'&&Boolean(
+      process.env.CLASSPULSE_VAPID_PUBLIC_KEY&&process.env.CLASSPULSE_VAPID_PRIVATE_KEY
+      &&process.env.CLASSPULSE_VAPID_SUBJECT),
+      publicKey:p.role==='Student'?(process.env.CLASSPULSE_VAPID_PUBLIC_KEY||''):''});
+  }],
+  'POST /api/push/subscribe': [requireAuth(),async(ctx)=>{
+    const p=await me(ctx.user!);
+    if(p.role!=='Student'||p.deletedAt)return forbid('Only active student accounts can enable class alerts');
+    const payload=input(ctx.body);
+    const raw=payload.subscription as {endpoint?:unknown;keys?:{p256dh?:unknown;auth?:unknown};
+      expirationTime?:number|null}|undefined;
+    const endpoint=typeof raw?.endpoint==='string'?raw.endpoint:'';
+    const keys=raw?.keys;
+    const p256dh=typeof keys?.p256dh==='string'?keys.p256dh:'';
+    const auth=typeof keys?.auth==='string'?keys.auth:'';
+    if(!validBrowserPushEndpoint(endpoint)||endpoint.length>1800||
+      p256dh.length<30||p256dh.length>240||auth.length<10||auth.length>180){
+      return error('Invalid browser push subscription',400);
+    }
+    if(!configureWebPush())return error('Web push is not configured on this deployment',503);
+    const subscription={endpoint,keys:{p256dh,auth},
+      expirationTime:typeof raw?.expirationTime==='number'?raw.expirationTime:null};
+    const id=pushRecordId(p.userId,endpoint);
+    const existing=await get<BrowserPushRecord>('cp_push_subscriptions',id);
+    if(existing)await patch('cp_push_subscriptions',id,{subscription,updatedAt:nowIso()});
+    else await add('cp_push_subscriptions',{id,userId:p.userId,subscription,
+      createdAt:nowIso(),updatedAt:nowIso()});
+    return json({ok:true});
+  }],
+  'POST /api/push/unsubscribe': [requireAuth(),async(ctx)=>{
+    const p=await me(ctx.user!);
+    const endpoint=text(input(ctx.body).endpoint,1800);
+    if(!endpoint.startsWith('https://'))return error('Invalid subscription',400);
+    await db.tx.delete('cp_push_subscriptions',[pushRecordId(p.userId,endpoint)]);
+    return json({ok:true});
+  }],
   'GET /api/notices': [requireAuth(), async (ctx) => {
     const p = await me(ctx.user!);
     const rows = await list<{ title: string; body: string; kind: string; createdAt: string; read: boolean }>(noticesTable(p.userId), 80);
@@ -1424,152 +1513,69 @@ export const handler = router({
   }],
 
 
-  'GET /api/admin/rooms': [requireAuth(), adminGuard, async () => {
-    return json({rooms:await list<{id:string;code:string;building:string;capacity:number;status:string}>('cp_rooms',200)});
+  'POST /api/system/issue': [requireAuth(),async(ctx)=>{
+    const p=await me(ctx.user!),body=input(ctx.body);
+    const kind=text(body.kind,24).toLowerCase();
+    const severity=text(body.severity,12).toUpperCase();
+    const message=text(body.message,420)
+      .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi,'[email removed]')
+      .replace(/\b\+?\d[\d ()-]{8,}\d\b/g,'[number removed]');
+    if(!['crash','network','sync','account','other'].includes(kind)||message.length<8)
+      return error('Choose a category and describe the issue in at least eight characters',400);
+    const recent=(await list<SystemIssue>('cp_system_issues',120)).filter(item=>
+      item.reporterId===p.userId&&Date.now()-Date.parse(item.createdAt)<60000);
+    if(recent.length>2)return error('Please wait before submitting another issue',429);
+    const issue:SystemIssue={id:randomUUID(),kind:kind as SystemIssue['kind'],
+      severity:['LOW','MEDIUM','HIGH'].includes(severity)?severity as SystemIssue['severity']:'MEDIUM',
+      message,createdAt:nowIso(),reporterId:p.userId,status:'OPEN'};
+    if(!await add('cp_system_issues',issue))return error('Unable to store report',500);
+    await audit(p.userId,'REPORT_SYSTEM_ISSUE','SystemIssue',issue.id,'system');
+    return json({ok:true,issueId:issue.id});
   }],
-  'POST /api/admin/rooms/:id/status': [requireAuth(), adminGuard, async ctx => {
-    const room=await get<{code:string;status:string}>('cp_rooms',ctx.params.id);
-    if(!room)return error('Room not found',404);
-    const status=text(input(ctx.body).status,24).toUpperCase();
-    if(!['AVAILABLE','MAINTENANCE','INACTIVE'].includes(status))return error('Invalid room status',400);
-    if(status!=='AVAILABLE'){
-      const used=(await list<Section>('cp_sections',240)).some(s=>!s.archivedAt&&s.room.toUpperCase()===room.code.toUpperCase());
-      if(used)return error('Room is used by active classes; reassign those classes before marking it unavailable',409);
-    }
-    await patch('cp_rooms',ctx.params.id,{status});
-    await audit(ctx.user!.userId,'UPDATE_CAMPUS_ROOM','Room',ctx.params.id,'system');
-    return json({ok:true});
-  }],
-  'POST /api/admin/import/preview': [requireAuth(), adminGuard, async ctx => {
-    const body=input(ctx.body), kind=text(body.kind,20);
-    if(!['rooms','sections','enrollments'].includes(kind))return error('Invalid import kind',400);
-    const rows=body.rows;
-    if(!Array.isArray(rows)||rows.length<1||rows.length>15)return error('Import 1–15 rows per batch',400);
-    const result=await validateImport(kind,rows);
-    const fingerprint=createHash('sha256').update(JSON.stringify({kind,rows})).digest('hex');
-    return json({kind,total:rows.length,valid:result.valid.length,issues:result.issues,
-      fingerprint,example:result.valid.slice(0,4).map(x=>x.preview)});
-  }],
-  'POST /api/admin/import/commit': [requireAuth(), adminGuard, async ctx => {
-    const body=input(ctx.body),kind=text(body.kind,20);
-    const rows=body.rows;
-    const requestId=text(body.requestId,90);
-    const fingerprint=text(body.fingerprint,64);
-    if(!['rooms','sections','enrollments'].includes(kind)
-      ||!Array.isArray(rows)||rows.length<1||rows.length>15
-      ||!/^[-a-f0-9]{36}$/.test(requestId))return error('Invalid import request',400);
-    const actual=createHash('sha256').update(JSON.stringify({kind,rows})).digest('hex');
-    if(fingerprint!==actual)return error('Rows changed after preview; preview the latest file again',409);
-    const id='bulk-'+createHash('sha256').update(ctx.user!.userId+':'+requestId).digest('hex').slice(0,40);
-    const old=await get<{fingerprint:string;count:number}>('cp_bulk_receipts',id);
-    if(old)return old.fingerprint===fingerprint?json({ok:true,replayed:true,imported:old.count})
-      :error('Import request ID already used for another file',409);
-    const result=await validateImport(kind,rows);
-    if(result.issues.length)return error('Import validation changed; preview again',409);
-    const table=kind==='rooms'?'cp_rooms':kind==='sections'?'cp_sections':'cp_enrollments';
-    try{
-      await db.transact([
-        db.tx.add(table,result.valid.map(x=>x.record)),
-        db.tx.add('cp_bulk_receipts',[{id,fingerprint,count:result.valid.length,kind,
-          createdAt:nowIso(),adminId:ctx.user!.userId}]),
-      ]);
-    }catch{return error('Import could not complete. Check for duplicates and retry with a new preview.',409);}
-    await audit(ctx.user!.userId,'BULK_IMPORT_'+kind.toUpperCase(),'InstitutionalImport',id,'system');
-    return json({ok:true,imported:result.valid.length});
-  }],
-
-  'GET /api/admin/operations': [requireAuth(), adminGuard, async () => {
-    const [accounts, sections, enrollments, availability, sessions] = await Promise.all([
-      list<Profile>('cp_profiles'),
-      list<Section>('cp_sections'),
-      list<{ studentId: string; sectionId: string }>('cp_enrollments'),
-      list<{ status: string }>('cp_availability'),
-      list<Meeting>('cp_sessions'),
+  'GET /api/admin/system-health': [requireAuth(),adminGuard,async()=>{
+    const [issues,records,accounts]=await Promise.all([
+      list<SystemIssue>('cp_system_issues',150),
+      list<Attendance>('cp_attendance',250),
+      list<Profile>('cp_profiles',250),
     ]);
-    const roleCounts = {
-      Student: accounts.filter(p=>!p.deletedAt&&p.role==='Student').length,
-      Faculty: accounts.filter(p=>!p.deletedAt&&p.role==='Faculty').length,
-      Administrator: accounts.filter(p=>!p.deletedAt&&p.role==='System Administrator').length,
-    };
-    const classStatus: Record<string, number> = {};
-    for (const section of sections) {
-      const status = section.status || 'ATTENDING';
-      classStatus[status] = (classStatus[status] || 0) + 1;
-    }
-    const now = Date.now();
-    const activeQrSessions = sessions.filter((m) => m.status === 'OPEN'
-      && new Date(m.endAt).getTime() > now && new Date(m.startAt).getTime() < now);
-    return json({
-      roleCounts,
-      pendingRoles: accounts.filter((p) => !!p.roleRequest).length,
-      incompleteProfiles: accounts.filter((p) => !p.onboardingComplete).length,
-      sectionsWithoutRoom: sections.filter((s) => !s.room || /TBA|UNASSIGNED/i.test(s.room)).length,
-      sectionsWithoutFaculty: sections.filter((s) => !s.facultyId).length,
-      enrolledStudents: enrollments.length,
-      publishedAvailability: availability.length,
-      activeQrSessions: activeQrSessions.length,
-      classStatus,
-      updatedAt: nowIso(),
+    const open=issues.filter(i=>i.status==='OPEN');
+    const tz='Asia/Manila';
+    const localDay=(time:string)=>new Date(time).toLocaleDateString('en-CA',{
+      timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit'
     });
-  }],
-  'POST /api/admin/section/:id/update': [requireAuth(), adminGuard, async (ctx) => {
-    const current = await get<Section>('cp_sections', ctx.params.id);
-    if (!current) return error('Class section not found', 404);
-    const body = input(ctx.body);
-    const day = text(body.day, 18);
-    const startTime = text(body.startTime, 5);
-    const endTime = text(body.endTime, 5);
-    const room = text(body.room, 60);
-    const facultyId = text(body.facultyId, 90);
-    if (!validClassDay(day)
-      || !timeValid(startTime) || !timeValid(endTime)
-      || startTime >= endTime || !room || !facultyId) {
-      return error('Enter a valid classroom, day, start time, end time, and faculty account', 400);
-    }
-    const faculty = await get<Profile>('cp_profiles', facultyId);
-    if (!faculty || faculty.role !== 'Faculty') {
-      return error('Assigned faculty must have an approved Faculty role', 400);
-    }
-    // Preserve session integrity; faculty or schedule cannot be changed during an active QR meeting.
-    const active = (await list<Meeting>('cp_sessions')).some((m) =>
-      m.sectionId === current.id && m.status === 'OPEN' && Date.parse(m.endAt) > Date.now());
-    if (active) return error('Close the active QR session before editing this class schedule', 409);
-    const facultyClash = await ownTeachingConflict(facultyId,day,startTime,endTime,current.id);
-    if (facultyClash) return error('Assigned faculty has an overlapping '+facultyClash.courseCode+' class',409);
-    const roomClash = await roomConflict(room,day,startTime,endTime,current.term,current.id);
-    if (roomClash) return error('Room is booked by '+roomClash.courseCode+' on '+roomClash.day,409);
-    await patch('cp_sections', current.id, { day, startTime, endTime, room, facultyId, facultyName: faculty.name });
-    await audit(ctx.user!.userId, 'UPDATE_CLASS_REFERENCE', 'CourseSection', current.id, 'system');
-    for (const member of await sectionMembers(current.id)) {
-      await notify(member.studentId, current.courseCode + ' schedule updated',
-        day + ' ' + startTime + '–' + endTime + ' · ' + room, 'class');
-    }
-    return json({ ok: true });
-  }],
-  'POST /api/admin/section/:id/rotate-code': [requireAuth(), adminGuard, async (ctx) => {
-    const section = await get<Section>('cp_sections', ctx.params.id);
-    if (!section) return error('Class section not found', 404);
-    const joinCode = randomBytes(5).toString('hex').toUpperCase();
-    await patch('cp_sections', section.id, { joinCode });
-    await audit(ctx.user!.userId, 'ROTATE_JOIN_CODE', 'CourseSection', section.id, 'system');
-    return json({ ok: true, joinCode, message: 'Previous code is no longer valid for new enrollments.' });
-  }],
-
-  'GET /api/admin/summary': [requireAuth(), adminGuard, async (ctx) => {
-    const sections = await list<Section>('cp_sections');
-    const sessions = await list<Meeting>('cp_sessions');
-    const attendance = await list<Attendance>('cp_attendance');
-    const accounts = await list<Profile>('cp_profiles');
-    const counts = { PRESENT: 0, LATE: 0, ABSENT: 0, EXCUSED: 0 };
-    for (const a of attendance) {
-      if (a.academicStatus in counts) counts[a.academicStatus as keyof typeof counts]++;
-    }
-    await audit(ctx.user!.userId, 'VIEW_AGGREGATE_REPORT', 'Summary', 'campus', 'system');
-    return json({
-      accounts: accounts.length, courseSections: sections.length, qrSessions: sessions.length,
-      aggregate: counts, totalRecords: attendance.length,
-      note: 'Aggregate only. No student-level attendance is exposed to Administrator.',
+    const dailyReports=Array.from({length:7},(_,index)=>{
+      const date=new Date(Date.now()-(6-index)*86400000);
+      const day=localDay(date.toISOString());
+      return {day,label:date.toLocaleDateString('en-PH',{timeZone:tz,weekday:'short'}),
+        count:issues.filter(item=>localDay(item.createdAt)===day).length};
     });
+    const issueCategories=(['crash','network','sync','account','other'] as const)
+      .map(kind=>({kind,count:issues.filter(item=>item.kind===kind).length}));
+    const delayed=records.filter(a=>Number.isFinite(Date.parse(a.receivedAt))&&
+      Number.isFinite(Date.parse(a.capturedAt))&&
+      Date.parse(a.receivedAt)-Date.parse(a.capturedAt)>900000);
+    return json({checkedAt:nowIso(),api:'responding',
+      accounts:accounts.filter(p=>!p.deletedAt).length,
+      incompleteAccounts:accounts.filter(p=>!p.deletedAt&&!p.onboardingComplete).length,
+      pendingReviewScans:records.filter(a=>a.verificationStatus==='PENDING_REVIEW').length,
+      delayedSyncReports:delayed.length,scanSampleSize:records.length,
+      openIssueCount:open.length,totalIssueCount:issues.length,
+      resolvedIssueCount:issues.filter(i=>i.status==='RESOLVED').length,
+      highSeverityOpen:open.filter(i=>i.severity==='HIGH').length,
+      lastReportedAt:[...issues].sort((a,b)=>b.createdAt.localeCompare(a.createdAt))[0]?.createdAt||null,
+      dailyReports,issueCategories,
+      openIssues:open.sort((a,b)=>b.createdAt.localeCompare(a.createdAt)).slice(0,35)
+        .map(({reporterId,...rest})=>rest),
+      caveat:'Reports and upload delays are sampled from stored records only. Offline devices and unreported crashes cannot be monitored live.'});
+  }],
+  'POST /api/admin/system-issues/:id/resolve': [requireAuth(),adminGuard,async(ctx)=>{
+    const issue=await get<SystemIssue>('cp_system_issues',ctx.params.id);
+    if(!issue)return error('Issue not found',404);
+    if(issue.status==='RESOLVED')return json({ok:true});
+    if(!await patch('cp_system_issues',issue.id,{status:'RESOLVED',resolvedAt:nowIso()}))
+      return error('Refresh and retry',409);
+    await audit(ctx.user!.userId,'RESOLVE_ISSUE','SystemIssue',issue.id,'system');
+    return json({ok:true});
   }],
   'GET /api/admin/audit': [requireAuth(), adminGuard, async () => {
     const events = await list<{ actionType: string; targetType: string; scope: string; timestamp: string }>('cp_audit', 100);

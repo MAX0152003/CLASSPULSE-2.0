@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useRef, useState } from 'react';
-import { api, auth, notifications, ws } from '@appdeploy/client';
+import { api, auth, notifications, ws, backendConfigured } from './lib/platform';
 import { QRCodeSVG } from 'qrcode.react';
 import jsQR from 'jsqr';
 import {storeQueuedScan,listQueuedScans,removeQueuedScan,migrateOldScans,nextRetry} from './offlineQueue';
@@ -9,12 +9,23 @@ import {
   Check, CheckCircle2, ChevronRight, Clock3, CloudOff, Download, FileCheck2,
   FileText, GraduationCap, LayoutDashboard, LockKeyhole, LogIn, LogOut, Menu,
   Moon, Plus, QrCode, RefreshCcw, ScanLine, Settings, ShieldCheck,
-  Sparkles, Sun, UserCheck, Users, Wifi, X,
+  Sparkles, Sun, UserCheck, Users, Wifi, X, Eye, EyeOff, Mail, KeyRound, ArrowLeft,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { Search } from 'lucide-react';
 
 type Role = 'Student' | 'Faculty' | 'System Administrator';
+type SystemHealthData={
+  checkedAt:string;api:string;accounts:number;incompleteAccounts:number;
+  pendingReviewScans:number;delayedSyncReports:number;scanSampleSize:number;
+  openIssueCount:number;totalIssueCount:number;resolvedIssueCount:number;
+  highSeverityOpen:number;lastReportedAt:string|null;
+  dailyReports:Array<{day:string;label:string;count:number}>;
+  issueCategories:Array<{kind:string;count:number}>;
+  caveat:string;
+  openIssues:Array<{id:string;kind:string;message:string;severity:string;createdAt:string;status:string}>;
+};
+
 type NavPage = 'Overview' | 'Classes' | 'Attendance' | 'Student Records' | 'Excuses' | 'Consultations' | 'Notifications' | 'Administration' | 'Profile' | 'Settings';
 type Profile = { userId: string; name: string; email: string; role: Role; studentNumber?: string; department?: string; bio?: string; contactPhone?: string; yearLevel?: string; officeRoom?: string; roleRequest?: string; photoVerified?: boolean; onboardingComplete?: boolean; deletedAt?:string };
 type FacultyLive = { facultyId: string; name: string; status: string; updatedAt: string | null; classCodes: string[]; source: string };
@@ -39,15 +50,7 @@ type Booking = { id: string; slotId: string; studentId: string; topic: string; s
 type Notice = { id: string; title: string; body: string; kind: string; createdAt: string; read: boolean };
 type AuthUser = { userId: string; email?: string; name?: string };
 type Dashboard = { profile: Profile; sections: Section[]; meetings: Meeting[]; attendance: Attendance[]; excuses: Excuse[]; bookings: Booking[]; notices: Notice[]; currentDate: string };
-type AdminInfo = { accounts: number; courseSections: number; qrSessions: number; aggregate: Record<string, number>; totalRecords: number };
-type AdminOperations = {
-  roleCounts: { Student: number; Faculty: number; Administrator: number };
-  pendingRoles: number; incompleteProfiles: number; sectionsWithoutRoom: number;
-  sectionsWithoutFaculty: number; enrolledStudents: number;
-  publishedAvailability: number; activeQrSessions: number;
-  classStatus: Record<string, number>; updatedAt: string;
-};
-type UserDirectory = { userId: string; name: string; email: string; role: string; roleRequest: string; photoVerified: boolean };
+type UserDirectory = { userId: string; name: string; email: string; role: string; roleRequest: string; photoVerified: boolean; onboardingComplete?:boolean };
 type Outbox = QueuedScan;
 type PresenceStatus = 'AVAILABLE'|'IN CLASS'|'AWAY'|'NOT SET';
 type FacultyRoster = {
@@ -59,6 +62,8 @@ type FormState = Record<string, string>;
 type EntryMode = 'signin' | 'signup';
 type SignupDraft = { name: string; email: string; studentNumber: string; requestedRole: Role };
 const signupKey = 'cp-signup-draft';
+const strongEnough=(p:string)=>p.length>=8&&/[A-Za-z]/.test(p)&&/[0-9]/.test(p);
+const emailLooksValid=(value:string)=>/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value.trim());
 function readSignupDraft(): SignupDraft | null {
   try {
     const raw = sessionStorage.getItem(signupKey);
@@ -96,7 +101,6 @@ const pages: Record<Role, { page: NavPage; icon: LucideIcon; label: string }[]> 
   'System Administrator':[
     { page:'Overview',icon:LayoutDashboard,label:'Overview' },
     { page:'Administration',icon:ShieldCheck,label:'Administration' },
-    { page:'Classes',icon:CalendarDays,label:'Class Directory' },
     { page:'Profile',icon:Users,label:'My Profile' },
     { page:'Settings',icon:Settings,label:'Settings' },
   ],
@@ -244,6 +248,41 @@ function ClassDayFocus({ sections }: { sections: Section[] }) {
         : <p>{todaySections.length ? 'Classes finished today.' : 'No classes today.'}</p>}
     </div>
   </section>;
+}
+
+function SystemHealthGraphs({health}:{health:SystemHealthData|null}){
+  const days=health?.dailyReports||[];
+  const categories=health?.issueCategories||[];
+  const largest=Math.max(1,...days.map(day=>day.count));
+  const total=Math.max(1,health?.totalIssueCount||0);
+  return <div className='cp-system-graphs'>
+    <section className='cp-panel cp-system-graph' aria-label='Seven day technical issue trend'>
+      <div className='cp-system-graph-title'><div><span>7-DAY REPORTS</span><h3>Issue activity</h3></div>
+        <strong>{health?.totalIssueCount??'—'}<small>stored reports</small></strong></div>
+      <div className='cp-system-chart'>
+        {days.map(day=><div className='cp-system-chart-day' key={day.day}
+          title={day.day+': '+day.count+' submitted reports'}>
+          <strong>{day.count||''}</strong>
+          <div className='cp-system-chart-track'><i style={{height:(day.count/ largest*100)+'%'}}/></div>
+          <span>{day.label}</span>
+        </div>)}
+      </div>
+      <p>Reports submitted through ClassPulse, not automatically detected crashes.</p>
+    </section>
+    <section className='cp-panel cp-system-graph' aria-label='Technical issue categories'>
+      <div className='cp-system-graph-title'><div><span>REPORT CATEGORIES</span><h3>Where users need help</h3></div>
+        <strong>{health?.openIssueCount??'—'}<small>open</small></strong></div>
+      <div className='cp-system-kind-bars'>
+        {categories.map(item=><div key={item.kind} className='cp-system-kind'>
+          <div><span>{({crash:'App crashes',network:'Connectivity',sync:'Offline & sync',
+            account:'Account access',other:'Other'} as Record<string,string>)[item.kind]||item.kind}</span>
+            <strong>{item.count}</strong></div>
+          <div className='cp-system-kind-track'><i style={{width:(item.count/total*100)+'%'}}/></div>
+        </div>)}
+      </div>
+      <p>Only user-submitted incident reports are counted.</p>
+    </section>
+  </div>;
 }
 
 function OfflineSyncCenter({
@@ -598,7 +637,7 @@ function WeekTimetable({
   const tall=Math.max(topClasses.length,previewClasses.length,farClasses.length);
   // Card stack includes a dedicated clearance area for the 2 visible undercards.
   // Keep every layer inside the stage so weekday controls below are never obscured.
-  const deckHeight=Math.min(680,Math.max(312,238+Math.min(5,tall)*84));
+  const deckHeight=Math.min(590,Math.max(252,188+Math.min(5,tall)*90));
   const reducedHint='Swipe for next day · swipe back for previous';
   const renderCard=(dayIndex:number,depth:0|1|2|3)=>{
     const day=days[dayIndex];
@@ -660,9 +699,9 @@ function WeekTimetable({
   }
   return <div className='cp-week-deck'>
     <div className='cp-deck-titlebar'>
-      <div><span className='cp-deck-eyebrow'>SCHEDULE</span>
-        <h4>{days[active].label}<small>{String(active+1).padStart(2,'0')} / 07</small></h4>
-        <p>{topClasses.length} class{topClasses.length===1?'':'es'} this day</p>
+      <div><span className='cp-deck-eyebrow'>WEEKLY TIMETABLE</span>
+        <h4>My class week</h4>
+        <p>Swipe the cards or choose a weekday below</p>
       </div>
     </div>
     <div className='cp-deck-stage' tabIndex={0} role='group'
@@ -989,6 +1028,20 @@ export default function App() {
   const [authError, setAuthError] = useState('');
   const [entryMode, setEntryMode] = useState<EntryMode | null>(null);
   const [authRedirecting, setAuthRedirecting] = useState(false);
+  const [loginEmail,setLoginEmail]=useState('');
+  const [loginPassword,setLoginPassword]=useState('');
+  const [signupPassword,setSignupPassword]=useState('');
+  const [confirmPassword,setConfirmPassword]=useState('');
+  const [passwordVisible,setPasswordVisible]=useState(false);
+  const [forgotPassword,setForgotPassword]=useState(false);
+  const [resetEmailSent,setResetEmailSent]=useState(false);
+  const [passwordRecoveryMode,setPasswordRecoveryMode]=useState(false);
+  const [pendingRecoveryToken,setPendingRecoveryToken]=useState('');
+  const [recoveryPassword,setRecoveryPassword]=useState('');
+  const [recoveryConfirm,setRecoveryConfirm]=useState('');
+  const [pendingEmail,setPendingEmail]=useState('');
+  const [authNotice,setAuthNotice]=useState('');
+  const [verificationSent,setVerificationSent]=useState(false);
   const [roleChoiceConfirmed,setRoleChoiceConfirmed]=useState(false);
   const [deleteConfirm,setDeleteConfirm]=useState('');
   const [excuseMonth,setExcuseMonth]=useState(()=>dateOnly().slice(0,7));
@@ -1016,9 +1069,9 @@ export default function App() {
   const [slots, setSlots] = useState<Slot[]>([]);
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [notices, setNotices] = useState<Notice[]>([]);
+  const [priorityNotice,setPriorityNotice]=useState<Notice|null>(null);
+  const seenPriorityNoticesRef=useRef<Set<string>>(new Set());
   const [users, setUsers] = useState<UserDirectory[]>([]);
-  const [summary, setSummary] = useState<AdminInfo | null>(null);
-  const [operations, setOperations] = useState<AdminOperations | null>(null);
   const [accountQuery, setAccountQuery] = useState('');
   const [importKind,setImportKind]=useState<ImportKind>('rooms');
   const [importRows,setImportRows]=useState<Record<string,string>[]>([]);
@@ -1042,6 +1095,7 @@ export default function App() {
   const [recordFrom,setRecordFrom] = useState('');
   const [recordUntil,setRecordUntil] = useState('');
   const [expandedStudent, setExpandedStudent] = useState<string | null>(null);
+  const [manualSessionId,setManualSessionId]=useState('');
   const [selectedSubjectId, setSelectedSubjectId] = useState('');
   const [expandedSubjectId,setExpandedSubjectId] = useState<string|null>(null);
   const [busy, setBusy] = useState('');
@@ -1058,6 +1112,18 @@ export default function App() {
   const [camera, setCamera] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [photoFile, setPhotoFile] = useState<File | null>(null);
+  const [photoZoom,setPhotoZoom]=useState(1);
+  const [photoPanX,setPhotoPanX]=useState(0);
+  const [photoPanY,setPhotoPanY]=useState(0);
+  const [photoReady,setPhotoReady]=useState(false);
+  const photoCropCanvas=useRef<HTMLCanvasElement|null>(null);
+  const photoDragRef=useRef<{x:number;y:number;panX:number;panY:number}|null>(null);
+  const menuSwipeRef=useRef<{x:number;y:number}|null>(null);
+  const [expandedNotice,setExpandedNotice]=useState<Notice|null>(null);
+  const [systemHealth,setSystemHealth]=useState<SystemHealthData|null>(null);
+  const [userInvites,setUserInvites]=useState<Array<{
+    id:string;email:string;role:string;status:string;createdAt:string;expiresAt:string;
+  }>>([]);
   const [profilePhotoUrl, setProfilePhotoUrl] = useState<string | null>(null);
   const [scanStatus, setScanStatus] = useState<'idle' | 'opening' | 'scanning' | 'submitting' | 'error' | 'success'>('idle');
   const [scanError, setScanError] = useState('');
@@ -1080,6 +1146,9 @@ export default function App() {
       ? old.filter(d => d !== date)
       : old.length >= 14 ? old : [...old,date].sort());
   };
+  const chosenDuringSignup=readSignupDraft();
+  const signupRoleLocked=Boolean(chosenDuringSignup&&
+    chosenDuringSignup.email.toLowerCase()===authUser?.email?.toLowerCase());
   const role = profile?.role || 'Student';
   const isFaculty = role === 'Faculty';
   const isStudent = role === 'Student';
@@ -1089,7 +1158,54 @@ export default function App() {
   const [queueBusy,setQueueBusy]=useState(false);
   const [queueProblem,setQueueProblem]=useState('');
   const showMessage = (s: string) => { setMessage(s); window.setTimeout(() => setMessage(''), 4800); };
-  const navigate = (p: NavPage) => { setPage(p); setDrawer(false); window.scrollTo({ top: 0, behavior: 'smooth' }); };
+  const navigate=(target:NavPage)=>{
+    const destination=isAdmin&&['Classes','Attendance','Student Records','Excuses','Consultations','Notifications'].includes(target)
+      ?'Administration':target;
+    setPage(destination as NavPage);
+    setDrawer(false);
+    // Defer scrolling until the locked mobile menu releases the document.
+    window.requestAnimationFrame(()=>window.requestAnimationFrame(()=>
+      window.scrollTo({top:0,behavior:'auto'})));
+  };
+  // A deliberate left swipe across normal app content opens the menu.
+  // Keep class-deck swipes and form interactions independent.
+  const navTouchStart=(ev:React.TouchEvent<HTMLDivElement>)=>{
+    if(window.innerWidth>920||modal||ev.touches.length!==1){menuSwipeRef.current=null;return;}
+    const target=ev.target;
+    if(!drawer&&target instanceof Element&&target.closest(
+      '.cp-deck-stage,.cp-deck-days,.cp-slot-carousel,.cp-week-panel,input,textarea,select,canvas,[data-no-menu-swipe]'
+    )){menuSwipeRef.current=null;return;}
+    const t=ev.touches[0];
+    menuSwipeRef.current={x:t.clientX,y:t.clientY};
+  };
+  const navTouchEnd=(ev:React.TouchEvent<HTMLDivElement>)=>{
+    const start=menuSwipeRef.current;menuSwipeRef.current=null;
+    if(!start||window.innerWidth>920||modal)return;
+    const touch=ev.changedTouches[0],dx=touch.clientX-start.x,dy=touch.clientY-start.y;
+    if(Math.abs(dx)<76||Math.abs(dx)<Math.abs(dy)*1.7)return;
+    if(!drawer&&dx<0)setDrawer(true);
+    else if(drawer&&dx>0)setDrawer(false);
+  };
+  // Lock the page behind an open drawer, including iOS overscroll.
+  useEffect(()=>{
+    if(!drawer)return;
+    const y=window.scrollY;
+    const body=document.body;
+    const previous={position:body.style.position,top:body.style.top,
+      width:body.style.width,overflow:body.style.overflow};
+    body.style.position='fixed';body.style.top='-'+y+'px';
+    body.style.width='100%';body.style.overflow='hidden';
+    const preventBackground=(ev:TouchEvent)=>{
+      if(!(ev.target instanceof Element&&ev.target.closest('.cp-drawer')))ev.preventDefault();
+    };
+    document.addEventListener('touchmove',preventBackground,{passive:false});
+    return ()=>{
+      document.removeEventListener('touchmove',preventBackground);
+      body.style.position=previous.position;body.style.top=previous.top;
+      body.style.width=previous.width;body.style.overflow=previous.overflow;
+      window.scrollTo({top:y,behavior:'auto'});
+    };
+  },[drawer]);
   const openScanner = () => {
     if (!isStudent) return;
     failedScanRef.current = { token: '', at: 0 };
@@ -1194,7 +1310,11 @@ export default function App() {
     if(openRecordsPage){setModal('');navigate('Student Records');}
     try {
       const response=await api.get('/api/faculty/sections/'+sectionId+'/roster');
-      setFacultyRoster(response.data as FacultyRoster);
+      const result=response.data as FacultyRoster;
+      setFacultyRoster(result);
+      const ordered=[...result.meetings].sort((x,y)=>y.openedAt.localeCompare(x.openedAt));
+      setManualSessionId(previous=>result.meetings.some(m=>m.id===previous)
+        ?previous:ordered[0]?.id||'');
     } catch(e) {
       showMessage('Unable to load your class records. '+apiMessage(e));
     } finally {
@@ -1223,26 +1343,21 @@ export default function App() {
     setNotices(d.notices || []);
   }
   async function refreshAdministration() {
-    const [a,b,c,d,e] = await Promise.all([
-      api.get('/api/admin/users'), api.get('/api/admin/summary'),
-      api.get('/api/admin/audit'), api.get('/api/admin/operations'),
-      api.get('/api/sections'),
+    const [usersData,auditData,adminData,userData,healthData]=await Promise.all([
+      api.get('/api/admin/users'),api.get('/api/admin/audit'),
+      api.get('/api/admin/invites'),api.get('/api/admin/user-invites'),
+      api.get('/api/admin/system-health'),
     ]);
-    setUsers((a.data as { users: UserDirectory[] }).users || []);
-    setSummary(b.data as AdminInfo);
-    setAdminEvents((c.data as { events: typeof adminEvents }).events || []);
-    setOperations(d.data as AdminOperations);
-    setSections((e.data as { sections: Section[] }).sections || []);
-    const [roomResponse,inviteResponse]=await Promise.all([
-      api.get('/api/admin/rooms'),api.get('/api/admin/invites'),
-    ]);
-    setAdminRooms((roomResponse.data as {rooms:typeof adminRooms}).rooms||[]);
-    setAdminInvites((inviteResponse.data as {invites:typeof adminInvites}).invites||[]);
+    setUsers((usersData.data as {users:UserDirectory[]}).users||[]);
+    setAdminEvents((auditData.data as {events:typeof adminEvents}).events||[]);
+    setAdminInvites((adminData.data as {invites:typeof adminInvites}).invites||[]);
+    setUserInvites((userData.data as {invites:typeof userInvites}).invites||[]);
+    setSystemHealth(healthData.data as typeof systemHealth);
   }
   async function refreshPage(p: NavPage) {
     if (p === 'Overview') {
       if (role === 'System Administrator') {
-        await Promise.all([refreshDashboard(), refreshAdministration()]);
+        await refreshAdministration();
       } else {
         await Promise.all([refreshDashboard(), refreshLive(), ...(role === 'Faculty' ? [refreshMyPresence()] : [])]);
       }
@@ -1279,27 +1394,131 @@ export default function App() {
       await refreshAdministration();
     }
   }
-  useEffect(() => {
-    let mounted = true;
-    auth.getUser().then(async (u) => {
-      if (!mounted) return;
-      setAuthUser(u);
-      if (u) {
-        try {
-          const p=await bootstrap();
-          const draft=readSignupDraft();
-          if(draft&&!p.onboardingComplete&&
-            (!u.email||u.email.toLowerCase()!==draft.email.toLowerCase())){
-            setAuthError('This Google/Apple account uses a different email than the registration form. Sign out and verify the intended email.');
-          }
-          if(draft&&p.onboardingComplete)sessionStorage.removeItem(signupKey);
-          if(p.onboardingComplete&&!p.deletedAt)await refreshDashboard();
-        } catch (e) { if (mounted) setAuthError(apiMessage(e)); }
+  useEffect(()=>{
+    let mounted=true;
+    const query=new URLSearchParams(window.location.search);
+    const hash=new URLSearchParams(window.location.hash.replace(/^#/,''));
+    const authMode=query.get('auth');
+    const linkError=query.get('error_description')||hash.get('error_description');
+    const tokenHash=authMode==='reset'&&query.get('type')==='recovery'
+      ?query.get('token_hash'):'';
+    const clearCallbackUrl=()=>window.history.replaceState({},'',window.location.pathname);
+    const unsubscribe=auth.onRecoverySession(()=>{
+      if(!mounted||tokenHash)return;
+      setPasswordRecoveryMode(true);
+      setAuthError('');setInitialized(true);
+    });
+    if(tokenHash){
+      // Email scanners can GET the URL, but cannot consume this token:
+      // verification happens only after the user's Continue button press.
+      setPendingRecoveryToken(tokenHash);
+      setEntryMode(null);setInitialized(true);
+      clearCallbackUrl();
+      return ()=>{mounted=false;unsubscribe();};
+    }
+    if(linkError&&authMode==='reset'){
+      setEntryMode('signin');setForgotPassword(true);
+      setAuthError(linkError+'. Request a new password reset email.');
+      setInitialized(true);clearCallbackUrl();
+      return ()=>{mounted=false;unsubscribe();};
+    }
+    if(linkError){
+      setEntryMode('signin');
+      setAuthError(linkError+'. You may request a new confirmation or reset link.');
+    }
+    auth.getUser().then(async user=>{
+      if(!mounted)return;
+      setAuthUser(user);
+      if(authMode==='reset'){
+        if(user){
+          setPasswordRecoveryMode(true);
+          setAuthError('');
+        }else{
+          setEntryMode('signin');
+          setForgotPassword(true);
+          setAuthError('The password reset link is expired or invalid. Request a fresh link below.');
+        }
+        if(mounted)setInitialized(true);
+        window.history.replaceState({},'',window.location.pathname);
+        return;
       }
-      if (mounted) setInitialized(true);
-    }).catch((e) => { if (mounted) { setAuthError(apiMessage(e)); setInitialized(true); } });
-    return () => { mounted = false; };
-  }, []);
+      if(user){
+        try{
+          const profile=await bootstrap();
+          const draft=readSignupDraft();
+          if(draft&&!profile.onboardingComplete&&
+            (!user.email||user.email.toLowerCase()!==draft.email.toLowerCase())){
+            setAuthError('Your verified email does not match the pending registration. Use the same email or sign out.');
+          }
+          if(draft&&profile.onboardingComplete)sessionStorage.removeItem(signupKey);
+          if(profile.onboardingComplete&&!profile.deletedAt){
+            if(profile.role==='System Administrator')await refreshAdministration();
+            else await refreshDashboard();
+          }
+        }catch(error){if(mounted)setAuthError(apiMessage(error));}
+      }else if(authMode==='confirmed'&&!linkError){
+        setEntryMode('signin');
+        setAuthNotice('If your email was confirmed, sign in using your email and password. Otherwise request a new confirmation link.');
+      }
+      if(authMode||linkError||query.has('view')){
+        if(query.get('view')==='Notifications'&&user)setPage('Notifications');
+        window.history.replaceState({},'',window.location.pathname);
+      }
+      if(mounted)setInitialized(true);
+    }).catch(error=>{
+      if(mounted){
+        setAuthError(apiMessage(error));setEntryMode('signin');setInitialized(true);
+      }
+    });
+    return ()=>{mounted=false;unsubscribe();};
+  },[]);
+  useEffect(()=>{
+    if(!authUser?.userId||!profile?.onboardingComplete||profile.deletedAt)return;
+    const interval=window.setInterval(()=>{
+      if(document.visibilityState==='visible'){
+        void refreshLive().catch(()=>{});
+      }
+    },30000);
+    return ()=>window.clearInterval(interval);
+  },[authUser?.userId,profile?.onboardingComplete,profile?.deletedAt]);
+  // Foreground alerts work without OS permission; background push uses a service
+  // worker and requires explicit consent from the Student's own device.
+  useEffect(()=>{
+    if(!authUser?.userId||profile?.role!=='Student'||!profile.onboardingComplete)return;
+    let alive=true,running=false;
+    const key='cp-seen-class-alerts-'+authUser.userId;
+    try{
+      const previous=JSON.parse(sessionStorage.getItem(key)||'[]') as string[];
+      seenPriorityNoticesRef.current=new Set(previous.slice(-100));
+    }catch{seenPriorityNoticesRef.current=new Set();}
+    const check=async()=>{
+      if(running||document.visibilityState==='hidden')return;
+      running=true;
+      try{
+        const {data}=await api.get('/api/notices');
+        if(!alive)return;
+        const items=(data as {notices:Notice[]}).notices||[];
+        setNotices(items);
+        const freshest=items.find(item=>item.kind==='class'&&!item.read
+          &&!seenPriorityNoticesRef.current.has(item.id)
+          &&Date.now()-Date.parse(item.createdAt)<24*60*60*1000);
+        if(freshest){
+          seenPriorityNoticesRef.current.add(freshest.id);
+          try{sessionStorage.setItem(key,JSON.stringify(
+            [...seenPriorityNoticesRef.current].slice(-100)));}catch{}
+          setPriorityNotice(previous=>previous||freshest);
+        }
+      }catch{/* Retry when connectivity returns. Persisted notifications remain available. */}
+      finally{running=false;}
+    };
+    void check();
+    const interval=window.setInterval(()=>{void check();},6000);
+    const onVisibility=()=>{void check();};
+    document.addEventListener('visibilitychange',onVisibility);
+    return()=>{alive=false;window.clearInterval(interval);
+      document.removeEventListener('visibilitychange',onVisibility);};
+  },[authUser?.userId,profile?.role,profile?.onboardingComplete]);
+
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem('cp-live-theme', theme);
@@ -1544,9 +1763,12 @@ export default function App() {
         const response = await api.post('/api/attendance/scan', {
           token, capturedAt, clientScanId: crypto.randomUUID(),
         });
-        showMessage((response.data as { review: boolean }).review
-          ? 'QR recorded and awaiting faculty timestamp review.'
-          : 'Attendance automatically verified and recorded.');
+        const result=response.data as {review:boolean;autoEnrolled?:boolean};
+        showMessage(result.autoEnrolled
+          ? 'Successfully joined the class through its QR. Your attendance awaits faculty photo verification.'
+          : result.review
+            ? 'QR recorded and awaiting faculty timestamp review.'
+            : 'Attendance automatically verified and recorded.');
         await refreshPage('Attendance');
       }
       setScanStatus('success');
@@ -1606,43 +1828,131 @@ export default function App() {
     setOutbox(await listQueuedScans(queueKey));
     await syncOutbox();
   }
-  function openEntry(mode: EntryMode) {
-    setAuthError('');
-    setAuthRedirecting(false);
+  function openEntry(mode:EntryMode){
+    setAuthError('');setAuthNotice('');setVerificationSent(false);
+    setResetEmailSent(false);setForgotPassword(false);
+    setAuthRedirecting(false);setPasswordVisible(false);
+    setLoginPassword('');setSignupPassword('');setConfirmPassword('');
     setEntryMode(mode);
   }
-  async function beginAuthentication() {
-    if (authRedirecting) return;
-    setAuthError('');
-    if (entryMode === 'signup') {
-      const d = {
-        name:signupDraft.name.trim(), email:signupDraft.email.trim().toLowerCase(),
-        studentNumber:signupDraft.studentNumber.trim(), requestedRole:signupDraft.requestedRole
-      };
-      if (d.name.length < 2) return setAuthError('Please enter your full name.');
-      if (!/^[^@ ]+@[^@ .]+\.[^@ ]+$/.test(d.email)) return setAuthError('Enter a valid email address.');
-      try {
-        sessionStorage.setItem(signupKey, JSON.stringify(d));
-        setSignupDraft(d);
-      } catch { return setAuthError('Browser storage is unavailable. Open ClassPulse directly in Safari, Chrome or Edge.'); }
-    } else {
-      try { sessionStorage.removeItem(signupKey); } catch { /* Login should still be available. */ }
-    }
+  async function beginAuthentication(){
+    if(authRedirecting)return;
+    setAuthError('');setAuthNotice('');
     setAuthRedirecting(true);
-    try {
-      await auth.signInWithRedirect();
-    } catch (e) {
-      setAuthRedirecting(false);
-      const message = apiMessage(e);
-      setAuthError(message.includes('storage-unavailable')
-        ? 'Enable browser cookies and storage, or open ClassPulse in Safari, Chrome, or Edge.'
-        : message.includes('navigation-timeout')
-          ? 'The secure sign-in page could not open. Use Safari, Chrome, or Edge to open the app directly.'
-          : message);
+    try{
+      if(entryMode==='signup'){
+        const details={
+          name:signupDraft.name.trim(),
+          email:signupDraft.email.trim().toLowerCase(),
+          studentNumber:signupDraft.studentNumber.trim(),
+          requestedRole:signupDraft.requestedRole,
+        };
+        if(details.name.length<2)throw Error('Enter your full name.');
+        if(!emailLooksValid(details.email))throw Error('Enter a valid email address.');
+        if(!strongEnough(signupPassword))
+          throw Error('Use at least 8 characters, including letters and a number.');
+        if(signupPassword!==confirmPassword)throw Error('Passwords do not match.');
+        try{sessionStorage.setItem(signupKey,JSON.stringify(details));}
+        catch{throw Error('Browser storage is unavailable. Open ClassPulse in Safari, Chrome or Edge.');}
+        setSignupDraft(details);
+        const outcome=await auth.signUpWithPassword({
+          name:details.name,email:details.email,password:signupPassword,
+          studentNumber:details.studentNumber,role:details.requestedRole as 'Student'|'Faculty',
+        });
+        setSignupPassword('');setConfirmPassword('');
+        setPendingEmail(details.email);
+        if(outcome.emailSent){
+          setVerificationSent(true);
+        }else if(outcome.signedIn){
+          window.location.assign('/');
+        }
+      }else{
+        if(!emailLooksValid(loginEmail))throw Error('Enter your email address.');
+        if(!loginPassword)throw Error('Enter your password.');
+        await auth.signInWithPassword({email:loginEmail,password:loginPassword});
+        setLoginPassword('');
+        window.location.assign('/');
+      }
+    }catch(error){
+      const message=apiMessage(error);
+      if(/email not confirmed/i.test(message)){
+        setPendingEmail((entryMode==='signup'?signupDraft.email:loginEmail).trim().toLowerCase());
+        setVerificationSent(true);
+      }else{
+        setAuthError(message);
+      }
+    }finally{setAuthRedirecting(false);}
+  }
+  async function beginOAuth(provider:'google'|'apple'){
+    if(authRedirecting)return;
+    setAuthError('');setAuthRedirecting(true);
+    try{
+      // Provider identity is verified by Supabase; onboarding asks the
+      // signed-in person to choose Student or Faculty afterwards.
+      try{sessionStorage.removeItem(signupKey);}catch{}
+      await auth.signInWithRedirect({provider});
+    }catch(error){
+      setAuthError(apiMessage(error));setAuthRedirecting(false);
     }
   }
+  async function resendConfirmation(){
+    if(authRedirecting||!pendingEmail)return;
+    setAuthRedirecting(true);setAuthError('');
+    try{
+      await auth.resendConfirmation(pendingEmail);
+      setAuthNotice('Confirmation email requested. Check your inbox and spam folder.');
+    }catch(error){setAuthError(apiMessage(error));}
+    finally{setAuthRedirecting(false);}
+  }
+  async function sendPasswordReset(){
+    if(authRedirecting)return;
+    setAuthError('');setAuthRedirecting(true);
+    try{
+      if(!emailLooksValid(loginEmail))throw Error('Enter a valid email address.');
+      await auth.resetPassword(loginEmail);
+      setResetEmailSent(true);
+    }catch(error){setAuthError(apiMessage(error));}
+    finally{setAuthRedirecting(false);}
+  }
+  async function confirmRecoveryLink(){
+    if(authRedirecting||!pendingRecoveryToken)return;
+    setAuthError('');setAuthRedirecting(true);
+    try{
+      const recovered=await auth.verifyRecoveryToken(pendingRecoveryToken);
+      setPendingRecoveryToken('');
+      setAuthUser(recovered);
+      setPasswordRecoveryMode(true);
+      setAuthError('');
+    }catch(error){
+      setPendingRecoveryToken('');
+      setEntryMode('signin');setForgotPassword(true);
+      setAuthError('This reset link could not be verified. It may already have been used or expired. Request a new email. '+apiMessage(error));
+    }finally{setAuthRedirecting(false);}
+  }
+  async function finishPasswordReset(){
+    if(authRedirecting)return;
+    setAuthError('');
+    if(!strongEnough(recoveryPassword)){
+      setAuthError('Use at least 8 characters, including letters and a number.');return;
+    }
+    if(recoveryPassword!==recoveryConfirm){
+      setAuthError('Passwords do not match.');return;
+    }
+    setAuthRedirecting(true);
+    try{
+      await auth.updatePassword(recoveryPassword);
+      setRecoveryPassword('');setRecoveryConfirm('');
+      await auth.signOut();
+      setPasswordRecoveryMode(false);
+      setAuthUser(null);setProfile(null);
+      setEntryMode('signin');setForgotPassword(false);
+      setAuthError('');
+      setAuthNotice('Password updated successfully. Sign in using your new password.');
+    }catch(error){setAuthError(apiMessage(error));}
+    finally{setAuthRedirecting(false);}
+  }
   async function completeRegistration() {
-    if(profile?.role!=='System Administrator'&&!roleChoiceConfirmed){
+    if(profile?.role!=='System Administrator'&&!roleChoiceConfirmed&&!signupRoleLocked){
       setAuthError('Select Student or Faculty to continue.');return;
     }
     if (form.name.trim().length < 2) { setAuthError('Enter your full name first.'); return; }
@@ -1656,14 +1966,19 @@ export default function App() {
     });
     try { sessionStorage.removeItem(signupKey); } catch { /* Best effort cleanup. */ }
     setAuthError('');
-    await bootstrap();
-    await refreshDashboard();
+    const updatedProfile=await bootstrap();
+    if(updatedProfile.role==='System Administrator')await refreshAdministration();
+    else await refreshDashboard();
     showMessage('Your ClassPulse profile is ready.');
   }
   async function signOut() {
     sessionStorage.removeItem('cp-entry-mode');
+    try{await notifications.unsubscribe();}catch{/* The user can change permissions in browser settings. */}
+    seenPriorityNoticesRef.current.clear();setPriorityNotice(null);
     setOutbox([]);setQueueProblem('');
     await auth.signOut();
+    setLoginPassword('');setSignupPassword('');setConfirmPassword('');
+    setRecoveryPassword('');setRecoveryConfirm('');
     setAuthUser(null);
     setRoleChoiceConfirmed(false);
     setProfile(null);
@@ -1676,8 +1991,10 @@ export default function App() {
   }
   async function openMeeting(sectionId: string) {
     const { data: r } = await api.post('/api/sessions/open', { sectionId });
-    setCurrentSession((r as { meeting: Meeting }).meeting);
+    const result=r as {meeting:Meeting;reused?:boolean};
+    setCurrentSession(result.meeting);
     setModal('qr');
+    if(result.reused)showMessage('QR refreshed for the same class meeting. Previous attendance records are preserved.');
     await refreshDashboard();
   }
   async function qrModal(meeting: Meeting) { setCurrentSession(meeting); setModal('qr'); }
@@ -1701,71 +2018,318 @@ export default function App() {
     await refreshPage('Excuses');
     showMessage('Your absence request was submitted to your assigned faculty.');
   }
+  useEffect(()=>{
+    if(!photoFile)return;
+    let cancelled=false;
+    setPhotoReady(false);
+    const url=URL.createObjectURL(photoFile);
+    const image=new Image();
+    image.onload=()=>{
+      if(cancelled||!photoCropCanvas.current)return;
+      const canvas=photoCropCanvas.current,ctx=canvas.getContext('2d');
+      if(!ctx)return;
+      const w=image.naturalWidth,h=image.naturalHeight,side=Math.min(w,h)/photoZoom;
+      if(!side||!Number.isFinite(side))return;
+      const sx=(w-side)/2*(1+photoPanX/100);
+      const sy=(h-side)/2*(1+photoPanY/100);
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      ctx.drawImage(image,sx,sy,side,side,0,0,canvas.width,canvas.height);
+      setPhotoReady(true);
+    };
+    image.onerror=()=>{if(!cancelled)setPhotoReady(false);};
+    image.src=url;
+    return ()=>{cancelled=true;URL.revokeObjectURL(url);};
+  },[photoFile,photoZoom,photoPanX,photoPanY]);
   async function uploadPhoto() {
-    if (!photoFile) return;
-    if (!['image/jpeg','image/png','image/webp'].includes(photoFile.type)) {
-      showMessage('Use a JPG, PNG or WebP image for your profile.'); return;
+    const canvas=photoCropCanvas.current;
+    if(!photoFile||!canvas||!photoReady)return;
+    const jpeg=canvas.toDataURL('image/jpeg',.87).split(',')[1];
+    if(!jpeg||jpeg.length>2_900_000){
+      showMessage('Could not prepare photo. Choose another picture.');return;
     }
-    if (photoFile.size > 2_000_000) {
-      showMessage('Choose a profile photo smaller than 2 MB.'); return;
-    }
-    await api.post('/api/profile/photo', {
-      contentType: photoFile.type, content: await fileBase64(photoFile),
-    });
-    setPhotoFile(null);
-    await bootstrap();
-    await loadProfilePhoto();
-    showMessage('Your new profile photo was saved. Faculty verification is separate.');
+    await api.post('/api/profile/photo',{contentType:'image/jpeg',content:jpeg});
+    setPhotoFile(null);setPhotoReady(false);
+    await bootstrap();await loadProfilePhoto();
+    showMessage('Profile picture updated. Faculty verification is separate.');
   }
 
   if (!initialized) return <div className='cp-loading'><Brand/><div className='cp-spinner'/><span>Preparing your campus workspace…</span></div>;
 
-  if (!authUser && entryMode) return <div className='cp-auth-page'>
+  if(pendingRecoveryToken)return <div className='cp-auth-page cp-auth-v2'>
     <aside className='cp-auth-side'>
       <Brand light/>
-      <div><span className='cp-eyebrow light'>WELCOME TO CLASSPULSE</span><LogoMark large/>
-        <h1>Every class.<br/><em>In sync.</em></h1>
-        <p>One academic home for schedules, attendance, consultations, and faculty availability.</p>
-        <span className='cp-auth-side-trust'><ShieldCheck size={18}/> Verified identity · Controlled role access</span>
-      </div>
-      <small>MSU MAIN CAMPUS · CLASS PULSE</small>
+      <div><span className='cp-eyebrow light'>ACCOUNT RECOVERY</span>
+        <h1>One quick<br/><em>security check.</em></h1>
+        <p>Your recovery link has opened ClassPulse. Confirm below to verify it securely.</p></div>
+      <small>MSU MAIN CAMPUS · CLASSPULSE</small>
     </aside>
     <main className='cp-auth-main'>
-      <div className='cp-auth-form'>
-        <button className='cp-auth-back' onClick={() => {setEntryMode(null);setAuthError('');}}>‹ Back to website</button>
-        <div className='cp-auth-tabs' role='tablist' aria-label='Account access'>
-          <button role='tab' aria-selected={entryMode === 'signin'} className={entryMode === 'signin' ? 'selected' : ''} onClick={() => openEntry('signin')}>Sign in</button>
-          <button role='tab' aria-selected={entryMode === 'signup'} className={entryMode === 'signup' ? 'selected' : ''} onClick={() => openEntry('signup')}>Create account</button>
-        </div>
-        <span className='cp-auth-kicker'>{entryMode === 'signup' ? 'NEW CAMPUS PROFILE' : 'WELCOME BACK'}</span>
-        <h2>{entryMode === 'signup' ? 'Create your account.' : 'Sign in to ClassPulse.'}</h2>
-        <p className='cp-auth-subtitle'>{entryMode === 'signup'
-          ? 'Enter your details. Verify with Google, Apple or email, then confirm your role.'
-          : 'Continue with Google, Apple or a secure email link.'}</p>
-        {entryMode === 'signup' && <div className='cp-auth-fields'>
-          <label className='cp-field'><span>Full name *</span><input autoComplete='name' placeholder='Your full name' value={signupDraft.name}
-            onChange={e => setSignupDraft(v=>({...v,name:e.target.value}))}/></label>
-          <label className='cp-field'><span>Email address *</span><input type='email' inputMode='email' autoComplete='email' placeholder='name@example.com' value={signupDraft.email}
-            onChange={e => setSignupDraft(v=>({...v,email:e.target.value}))}/></label>
-          <label className='cp-field'><span>Student / Employee ID (optional)</span><input placeholder='Campus ID' value={signupDraft.studentNumber}
-            onChange={e => setSignupDraft(v=>({...v,studentNumber:e.target.value}))}/></label>
-          <label className='cp-field'><span>Campus role</span><select value={signupDraft.requestedRole}
-            onChange={ev => setSignupDraft(v=>({...v,requestedRole:ev.target.value as Role}))}>
-            <option value='Student'>Student</option><option value='Faculty'>Faculty</option>
-          </select></label>
-          <p className='cp-auth-role-note'><ShieldCheck size={16}/>
-            You will confirm your role after Google, Apple or email verification.</p>
-        </div>}
-        {authError && <div role='alert' className='cp-auth-error'>{authError}</div>}
-        <button disabled={authRedirecting} className='cp-button dark full cp-auth-submit' onClick={beginAuthentication}>
-          {authRedirecting ? 'Opening secure verification…' : entryMode === 'signup' ? 'Verify email & create account' : 'Continue to secure sign in'}
-          {authRedirecting ? <span className='cp-spinner small'/> : <ArrowRight size={17}/>}
+      <section className='cp-auth-form cp-auth-form-v2'>
+        <div className='cp-auth-form-icon'><ShieldCheck size={23}/></div>
+        <span className='cp-auth-kicker'>VERIFY RESET REQUEST</span>
+        <h2>Continue to reset your password</h2>
+        <p className='cp-auth-subtitle'>This confirmation protects one-time reset links
+          against automatic email link previews. Only continue if you requested
+          this password reset yourself.</p>
+        {authError&&<p className='cp-auth-error' role='alert'>{authError}</p>}
+        <button className='cp-button dark full cp-auth-submit'
+          disabled={authRedirecting} onClick={()=>void confirmRecoveryLink()}>
+          {authRedirecting?'Verifying your link…':'Continue securely'}
+          {authRedirecting?<span className='cp-spinner small'/>:<ArrowRight size={17}/>}
         </button>
-        <p className='cp-auth-hint'><LockKeyhole size={17}/> Secure sign-in · No password to remember.</p>
-        <div className='cp-auth-switch'>
-          {entryMode === 'signup' ? 'Already registered?' : 'New to ClassPulse?'}
-          <button onClick={() => openEntry(entryMode === 'signup' ? 'signin' : 'signup')}>{entryMode === 'signup' ? 'Sign in' : 'Create account'}</button>
+      </section>
+    </main>
+  </div>;
+  if(passwordRecoveryMode)return <div className='cp-auth-page cp-auth-v2'>
+    <aside className='cp-auth-side'>
+      <Brand light/>
+      <div><span className='cp-eyebrow light'>SECURE ACCOUNT RECOVERY</span>
+        <h1>Fresh start.<br/><em>Same campus.</em></h1>
+        <p>Choose a new password for your ClassPulse account.</p></div>
+      <small>MSU MAIN CAMPUS · CLASSPULSE</small>
+    </aside>
+    <main className='cp-auth-main'>
+      <form className='cp-auth-form cp-auth-form-v2' onSubmit={event=>{
+        event.preventDefault();void finishPasswordReset();
+      }}>
+        <div className='cp-auth-form-icon'><KeyRound size={22}/></div>
+        <span className='cp-auth-kicker'>RESET YOUR PASSWORD</span>
+        <h2>Set a new password</h2>
+        <p className='cp-auth-subtitle'>Your reset link has been verified. This password will replace your previous one.</p>
+        <label className='cp-field'><span>New password</span>
+          <div className='cp-auth-password-wrap'>
+            <input type={passwordVisible?'text':'password'} autoComplete='new-password'
+              minLength={8} value={recoveryPassword}
+              onChange={ev=>setRecoveryPassword(ev.target.value)} required
+              placeholder='8+ characters, letters and a number'/>
+            <button type='button' aria-label={passwordVisible?'Hide password':'Show password'}
+              onClick={()=>setPasswordVisible(v=>!v)}>
+              {passwordVisible?<EyeOff size={17}/>:<Eye size={17}/>}
+            </button>
+          </div>
+        </label>
+        <label className='cp-field'><span>Confirm new password</span>
+          <input type={passwordVisible?'text':'password'} autoComplete='new-password'
+            value={recoveryConfirm} onChange={ev=>setRecoveryConfirm(ev.target.value)}
+            placeholder='Repeat new password' required/>
+        </label>
+        {authError&&<p className='cp-auth-error' role='alert'>{authError}</p>}
+        <button className='cp-button dark full cp-auth-submit'
+          type='submit' disabled={authRedirecting||!strongEnough(recoveryPassword)||
+            recoveryPassword!==recoveryConfirm}>
+          {authRedirecting?'Updating password…':'Save new password'}
+          {authRedirecting?<span className='cp-spinner small'/>:<ArrowRight size={17}/>}
+        </button>
+      </form>
+    </main>
+  </div>;
+  if (!authUser && entryMode) return <div className='cp-auth-page cp-auth-v2'>
+    <aside className='cp-auth-side'>
+      <Brand light/>
+      <div className='cp-auth-visual'>
+        <span className='cp-eyebrow light'>THE CAMPUS, CONNECTED</span>
+        <LogoMark large/>
+        <h1>Every class.<br/><em>In sync.</em></h1>
+        <p>Your academic day, in one secure place — schedules, QR attendance,
+          excuse letters, consultations and updates.</p>
+        <div className='cp-auth-side-benefits'>
+          <span><CalendarDays size={17}/> Your schedule, always organized</span>
+          <span><ScanLine size={17}/> Attendance with verified QR</span>
+          <span><ShieldCheck size={17}/> Private student and faculty access</span>
         </div>
+      </div>
+      <small>CLASSPULSE · MINDANAO STATE UNIVERSITY — MAIN CAMPUS</small>
+    </aside>
+    <main className='cp-auth-main'>
+      <div className='cp-auth-form cp-auth-form-v2'>
+        <button type='button' className='cp-auth-back' onClick={()=>{
+          setEntryMode(null);setAuthError('');setVerificationSent(false);
+          setForgotPassword(false);setResetEmailSent(false);setLoginPassword('');
+          setSignupPassword('');setConfirmPassword('');
+        }}><ArrowLeft size={15}/> Back to website</button>
+        <div className='cp-auth-tabs' role='group' aria-label='Account access'>
+          <button type='button' aria-pressed={entryMode==='signin'}
+            className={entryMode==='signin'?'selected':''}
+            onClick={()=>openEntry('signin')}>Sign in</button>
+          <button type='button' aria-pressed={entryMode==='signup'}
+            className={entryMode==='signup'?'selected':''}
+            onClick={()=>openEntry('signup')}>Create account</button>
+        </div>
+        {verificationSent?
+          <section className='cp-auth-email-confirm' aria-live='polite'>
+            <div className='cp-auth-confirm-icon'><Mail size={26}/></div>
+            <span className='cp-auth-kicker'>VERIFY YOUR EMAIL</span>
+            <h2>Check your inbox</h2>
+            <p>We requested a confirmation link for
+              <strong> {pendingEmail}</strong>. Open the email and follow the link
+              to return to ClassPulse.</p>
+            <div className='cp-auth-confirm-steps'>
+              <span><Check size={15}/> Check Inbox and Spam</span>
+              <span><Check size={15}/> Open the latest confirmation link</span>
+              <span><Check size={15}/> Return here to finish your campus profile</span>
+            </div>
+            {authNotice&&<p className='cp-auth-success' role='status'>{authNotice}</p>}
+            {authError&&<p className='cp-auth-error' role='alert'>{authError}</p>}
+            <button type='button' className='cp-button dark full'
+              disabled={authRedirecting} onClick={()=>void resendConfirmation()}>
+              {authRedirecting?'Sending…':'Resend confirmation email'} <ArrowRight size={16}/>
+            </button>
+            <button type='button' className='cp-auth-text-action'
+              onClick={()=>{setVerificationSent(false);setAuthError('');setAuthNotice('');}}>
+              Use a different email
+            </button>
+          </section>:
+          forgotPassword?
+          <section className='cp-auth-forgot'>
+            <div className='cp-auth-form-icon'><KeyRound size={22}/></div>
+            <span className='cp-auth-kicker'>ACCOUNT RECOVERY</span>
+            <h2>Forgot your password?</h2>
+            <p className='cp-auth-subtitle'>Enter your email address. We’ll send a
+              secure reset link if an account exists.</p>
+            {resetEmailSent?
+              <div className='cp-auth-confirm-steps'>
+                <CheckCircle2 size={19}/>
+                <span>If an account exists for {loginEmail}, its reset instructions
+                  have been sent. Check your inbox and spam folder.</span>
+              </div>:
+              <form onSubmit={event=>{event.preventDefault();void sendPasswordReset();}}>
+                <label className='cp-field'><span>Email address</span>
+                  <input type='email' autoComplete='email' inputMode='email'
+                    placeholder='you@example.com' required value={loginEmail}
+                    onChange={event=>setLoginEmail(event.target.value)}/>
+                </label>
+                <button className='cp-button dark full cp-auth-submit' type='submit'
+                  disabled={authRedirecting||!backendConfigured}>
+                  {authRedirecting?'Sending…':'Send password reset link'}
+                  {authRedirecting?<span className='cp-spinner small'/>:<ArrowRight size={17}/>}
+                </button>
+              </form>}
+            {authError&&<p className='cp-auth-error' role='alert'>{authError}</p>}
+            <button type='button' className='cp-auth-text-action'
+              onClick={()=>{setForgotPassword(false);setResetEmailSent(false);setAuthError('');}}>
+              <ArrowLeft size={14}/> Back to sign in
+            </button>
+          </section>:
+          <>
+            <span className='cp-auth-kicker'>
+              {entryMode==='signup'?'JOIN CLASSPULSE':'WELCOME BACK'}
+            </span>
+            <h2>{entryMode==='signup'?'Create your campus account':'Sign in to ClassPulse'}</h2>
+            <p className='cp-auth-subtitle'>
+              {entryMode==='signup'
+                ?'Your account keeps classes, attendance and academic requests in one place.'
+                :'Enter your email and password to continue your academic day.'}
+            </p>
+            {authNotice&&<p className='cp-auth-success' role='status'>{authNotice}</p>}
+            <form className='cp-auth-credentials-form' onSubmit={event=>{
+              event.preventDefault();void beginAuthentication();
+            }}>
+              {entryMode==='signup'&&<>
+                <label className='cp-field'><span>Full name</span>
+                  <input autoComplete='name' required minLength={2} placeholder='Your full name'
+                    value={signupDraft.name}
+                    onChange={ev=>setSignupDraft(v=>({...v,name:ev.target.value}))}/>
+                </label>
+              </>}
+              <label className='cp-field'><span>Email address</span>
+                <input type='email' autoComplete='email' inputMode='email'
+                  required placeholder='you@example.com'
+                  value={entryMode==='signup'?signupDraft.email:loginEmail}
+                  onChange={ev=>entryMode==='signup'
+                    ?setSignupDraft(v=>({...v,email:ev.target.value}))
+                    :setLoginEmail(ev.target.value)}/>
+              </label>
+              {entryMode==='signup'&&<>
+                <label className='cp-field'><span>Campus ID <small>(optional)</small></span>
+                  <input autoComplete='off' placeholder='Student / employee number'
+                    value={signupDraft.studentNumber}
+                    onChange={ev=>setSignupDraft(v=>({...v,studentNumber:ev.target.value}))}/>
+                </label>
+                <fieldset className='cp-auth-role-choice'>
+                  <legend>Register as</legend>
+                  <div>
+                    {(['Student','Faculty'] as const).map(r=><button
+                      key={r} type='button'
+                      aria-pressed={signupDraft.requestedRole===r}
+                      className={signupDraft.requestedRole===r?'selected':''}
+                      onClick={()=>setSignupDraft(v=>({...v,requestedRole:r}))}>
+                      {r==='Student'?<GraduationCap size={19}/>:<Users size={19}/>}
+                      <span>{r}</span>
+                      {signupDraft.requestedRole===r&&<Check size={15}/>}
+                    </button>)}
+                  </div>
+                </fieldset>
+              </>}
+              <label className='cp-field'><span>Password</span>
+                <div className='cp-auth-password-wrap'>
+                  <input type={passwordVisible?'text':'password'} required
+                    minLength={entryMode==='signup'?8:1}
+                    autoComplete={entryMode==='signup'?'new-password':'current-password'}
+                    placeholder={entryMode==='signup'?'Create a strong password':'Your password'}
+                    value={entryMode==='signup'?signupPassword:loginPassword}
+                    onChange={ev=>entryMode==='signup'
+                      ?setSignupPassword(ev.target.value):setLoginPassword(ev.target.value)}/>
+                  <button type='button' aria-label={passwordVisible?'Hide password':'Show password'}
+                    onClick={()=>setPasswordVisible(v=>!v)}>
+                    {passwordVisible?<EyeOff size={18}/>:<Eye size={18}/>}
+                  </button>
+                </div>
+              </label>
+              {entryMode==='signup'&&<>
+                <div className='cp-auth-password-hint' role='status'>
+                  <span className={signupPassword.length>=8?'passed':''}>
+                    <Check size={13}/> At least 8 characters</span>
+                  <span className={/[A-Za-z]/.test(signupPassword)&&/[0-9]/.test(signupPassword)?'passed':''}>
+                    <Check size={13}/> Letters and a number</span>
+                </div>
+                <label className='cp-field'><span>Confirm password</span>
+                  <input type={passwordVisible?'text':'password'} required
+                    autoComplete='new-password' placeholder='Repeat your password'
+                    value={confirmPassword} onChange={ev=>setConfirmPassword(ev.target.value)}/>
+                </label>
+                {confirmPassword&&signupPassword!==confirmPassword&&
+                  <small className='cp-auth-invalid'>Passwords must match.</small>}
+              </>}
+              {entryMode==='signin'&&<div className='cp-auth-help-row'>
+                <button type='button' onClick={()=>{
+                  setForgotPassword(true);setVerificationSent(false);setAuthError('');
+                  setResetEmailSent(false);setLoginPassword('');
+                }}>Forgot password?</button>
+              </div>}
+              {authError&&<p className='cp-auth-error' role='alert'>{authError}</p>}
+              {!backendConfigured&&<p className='cp-auth-error' role='alert'>
+                Sign-in is unavailable until Supabase configuration is completed.</p>}
+              <button type='submit' className='cp-button dark full cp-auth-submit'
+                disabled={authRedirecting||!backendConfigured||
+                  (entryMode==='signup'&&(!strongEnough(signupPassword)||
+                    signupPassword!==confirmPassword))}>
+                {authRedirecting?'Please wait…':entryMode==='signup'
+                  ?'Create account':'Sign in'}
+                {authRedirecting?<span className='cp-spinner small'/>:<ArrowRight size={17}/>}
+              </button>
+            </form>
+            <div className='cp-auth-divider'><span>or continue with</span></div>
+            <div className='cp-auth-oauth'>
+              <button type='button' disabled={authRedirecting||!backendConfigured}
+                onClick={()=>void beginOAuth('google')}>
+                <span className='cp-google-mark'>G</span> Google
+              </button>
+              <button type='button' disabled={authRedirecting||!backendConfigured}
+                onClick={()=>void beginOAuth('apple')}>
+                <span className='cp-apple-mark'>●</span> Apple
+              </button>
+            </div>
+            <p className='cp-auth-hint'><LockKeyhole size={16}/>
+              Passwords are protected by Supabase Auth. You'll verify your email
+              before entering your ClassPulse workspace.</p>
+            <div className='cp-auth-switch'>
+              {entryMode==='signup'?'Already have an account?':'New to ClassPulse?'}
+              <button type='button' onClick={()=>openEntry(entryMode==='signup'?'signin':'signup')}>
+                {entryMode==='signup'?'Sign in':'Create account'}
+              </button>
+            </div>
+          </>
+        }
       </div>
     </main>
   </div>;
@@ -1812,7 +2376,7 @@ export default function App() {
     <div className='cp-reg-intro'><Brand light/>
       <span className='cp-eyebrow light'>YOUR CAMPUS PROFILE</span>
       <h1>{sessionStorage.getItem('cp-entry-mode') === 'signup' ? 'Create your ClassPulse profile.' : 'Finish setting up your workspace.'}</h1>
-      <p>Verify your identity, complete your details, and open the Student or Faculty workspace immediately.</p>
+      <p>Your Student or Faculty role is selected when creating the account. Complete any remaining profile details only once.</p>
       <div className='cp-reg-steps'><span className='done'><Check size={15}/> Identity verified</span><span className='active'>2. Campus details</span><span>3. Access your workspace</span></div>
       <div className='cp-reg-note'><ShieldCheck size={20}/> Faculty workspaces activate after registration. Classroom ownership remains assigned by the institution. Administrator access is restricted to authorized emails.</div>
     </div>
@@ -1822,9 +2386,13 @@ export default function App() {
       <Field label='Full name' name='name' form={form} update={update} placeholder='Enter your first and last name' required/>
       <Field label='Campus / student / employee ID (optional)' name='studentNumber' form={form} update={update} placeholder='Your campus identifier'/>
       <div className='cp-reg-role-label'>{profile?.role==='System Administrator'
-        ? 'AUTHORIZED ADMINISTRATOR' : 'CHOOSE YOUR ROLE'}</div>
+        ? 'AUTHORIZED ADMINISTRATOR' : signupRoleLocked ? 'ROLE ALREADY SELECTED' : 'CHOOSE YOUR ROLE'}</div>
       {profile?.role==='System Administrator'
         ? <div className='cp-reg-admin-approved'><ShieldCheck size={20}/> Administrator access verified</div>
+        : signupRoleLocked
+          ? <div className='cp-reg-admin-approved'><CheckCircle2 size={20}/>
+              <strong>{form.requestedRole}</strong> · Selected during account creation
+            </div>
         : <div className='cp-reg-roles'>
         {[
           { name: 'Student', icon: GraduationCap, desc: 'Classes and attendance' },
@@ -1845,7 +2413,7 @@ export default function App() {
           Faculty QR and records require assigned classes.</p>}
       {(authError || message) && <p className='cp-auth-error' role='alert'>{authError || message}</p>}
       <button disabled={!!busy || form.name.trim().length < 2 ||
-        (profile?.role!=='System Administrator'&&!roleChoiceConfirmed)}
+        (profile?.role!=='System Administrator'&&!roleChoiceConfirmed&&!signupRoleLocked)}
         className='cp-button dark full cp-reg-submit' onClick={() => safeRun('registration', completeRegistration)}>Complete registration <ArrowRight size={18}/></button>
       <button className='cp-reg-switch' onClick={() => safeRun('sign-out', signOut)}>Use a different account</button>
     </section>
@@ -1896,17 +2464,6 @@ export default function App() {
       ['PRESENT','LATE','ABSENT'].includes(a.academicStatus));
     return {label:section.courseCode,value:subject.filter(a=>['PRESENT','LATE'].includes(a.academicStatus)).length,total:subject.length};
   });
-  const adminRoleBars=operations?[
-    {label:'Students',value:operations.roleCounts.Student,total:operations.roleCounts.Student+operations.roleCounts.Faculty+operations.roleCounts.Administrator},
-    {label:'Faculty',value:operations.roleCounts.Faculty,total:operations.roleCounts.Student+operations.roleCounts.Faculty+operations.roleCounts.Administrator},
-    {label:'Administrators',value:operations.roleCounts.Administrator,total:operations.roleCounts.Student+operations.roleCounts.Faculty+operations.roleCounts.Administrator},
-  ]:[];
-  const campusParts:MonitorPart[]=[
-    {label:'Present',value:summary?.aggregate?.PRESENT||0,color:'#219e75'},
-    {label:'Late',value:summary?.aggregate?.LATE||0,color:'#e6a14c'},
-    {label:'Absent',value:summary?.aggregate?.ABSENT||0,color:'#d76679'},
-    {label:'Excused',value:summary?.aggregate?.EXCUSED||0,color:'#8076cc'},
-  ];
   const graded = attendance.filter((a) => ['PRESENT','LATE','ABSENT'].includes(a.academicStatus));
   const onTime = graded.filter((a) => a.academicStatus === 'PRESENT').length;
   const lateCount = graded.filter((a) => a.academicStatus === 'LATE').length;
@@ -1920,13 +2477,21 @@ export default function App() {
     ['REJECTED','ABSENT','CANCELLED'].includes(status) ? 'red' : ['PENDING','PENDING REVIEW','LATE','DELAYED','PENDING_REVIEW'].includes(status) ? 'amber' : 'violet';
 
   const sidebar = <><div className='cp-sidebar-brand'><Brand light/></div>
-    <div className='cp-nav-section-title'>WORKSPACE / {role.toUpperCase()}</div><nav className='cp-side-links'>
-      {pages[role].map(({ page: item, icon: Icon, label }) => <button key={item} onClick={() => navigate(item)} className={page === item ? 'active' : ''}><Icon size={19}/><span>{label}</span>{page === item && <span className='cp-nav-active-indicator'/>}</button>)}
+    <div className='cp-nav-section-title'>MAIN MENU</div><nav className='cp-side-links'>
+      {pages[role].map(({page:item,icon:Icon,label})=><Fragment key={item}>
+        {(item==='Notifications'||item==='Profile')&&
+          <div className='cp-menu-separator' role='separator'
+            aria-label={item==='Profile'?'Account':'Updates'}/>}
+        <button onClick={()=>navigate(item)} className={page===item?'active':''}>
+          <Icon size={19}/><span>{label}</span>
+          {page===item&&<span className='cp-nav-active-indicator'/>}
+        </button>
+      </Fragment>)}
     </nav>
     <div className='cp-sidebar-bottom'><button title='Sign out' aria-label='Sign out'
       onClick={() => safeRun('sign-out', signOut)}><LogOut size={18}/><span>Sign out</span></button></div></>;
 
-  return <div className='cp-app'>
+  return <div className='cp-app' onTouchStart={navTouchStart} onTouchEnd={navTouchEnd}>
     <aside className='cp-sidebar'>{sidebar}</aside>
     {drawer && <div className='cp-drawer-overlay' onClick={() => setDrawer(false)}>
       <aside className='cp-drawer' role='navigation' aria-label='All ClassPulse pages'
@@ -1942,13 +2507,19 @@ export default function App() {
         <button className='cp-menu' aria-label='Open navigation'
           aria-expanded={drawer} onClick={() => setDrawer(true)}><Menu size={22}/></button>
         <div className='cp-breadcrumb cp-page-crumb'>
-          <strong>{page==='Overview'?'Dashboard':page}</strong>
+          <strong>{page==='Overview'
+            ?isAdmin?'Administrator':isFaculty?'Faculty':'Student'
+            :page}</strong>
         </div>
         <div className='cp-top-actions'>
         <span className={'cp-net ' + (online ? 'online' : 'offline')}>{online ? <Wifi size={14}/> : <CloudOff size={14}/>} {online ? 'Connected' : 'Offline'}</span>
         <button title='Toggle theme' className='cp-icon-button' onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}>{theme === 'light' ? <Moon size={19}/> : <Sun size={19}/>}</button>
         {!isAdmin && <button title='Notifications' className='cp-icon-button' onClick={() => navigate('Notifications')}><Bell size={19}/>{notices.some((n) => !n.read) && <i/>}</button>}
-        <button className='cp-profile-chip' onClick={() => navigate('Profile')} title='My profile'><span>{profileInitial}</span><div><strong>{profile?.name}</strong><small>{role}</small></div></button>
+        <button className='cp-profile-chip' onClick={()=>navigate('Profile')} title='My profile'>
+          <span>{profilePhotoUrl?<img className='cp-header-photo' src={profilePhotoUrl}
+            alt='My profile'/>:profileInitial}</span>
+          <div><strong>{profile?.name}</strong><small>{role}</small></div>
+        </button>
       </div></header>
       <main className='cp-content'>
         {page === 'Overview' && <>
@@ -1968,75 +2539,37 @@ export default function App() {
           </div>}
 
           {isAdmin ? <>
-            <div className='cp-admin-home-heading'>
-              <div><span><span className='cp-live-dot'/> CAMPUS CONTROL PLANE</span>
-                <h2>{greeting}, {firstName}.</h2><p>Approve roles, manage course sections, and monitor operational activity.</p></div>
-              <button className='cp-button dark' onClick={() => setModal('create-section')}><Plus size={16}/> New class section</button>
+            <section className='cp-system-hero cp-panel'>
+              <div><span className='cp-eyebrow light'>SYSTEM HEALTH CENTER</span>
+                <h2>ClassPulse operations</h2>
+                <p>Account access, connectivity, synchronization reports and application issues.</p></div>
+              <div className='cp-system-hero-status'><Activity size={23}/>
+                <strong>{systemHealth?.api==='responding'?'API responding':'Status not checked'}</strong>
+                <small>{systemHealth?.checkedAt?dateFmt(systemHealth.checkedAt):'No recent check'}</small>
+              </div>
+            </section>
+            <div className='cp-system-metrics'>
+              <button className='cp-system-metric' onClick={()=>navigate('Administration')}>
+                <Users size={22}/><strong>{systemHealth?.accounts??'—'}</strong><span>Active accounts</span></button>
+              <button className='cp-system-metric' onClick={()=>navigate('Administration')}>
+                <UserCheck size={22}/><strong>{systemHealth?.incompleteAccounts??'—'}</strong><span>Setup issues</span></button>
+              <button className='cp-system-metric' onClick={()=>navigate('Administration')}>
+                <CloudOff size={22}/><strong>{systemHealth?.delayedSyncReports??'—'}</strong><span>Delayed uploads · sample</span></button>
+              <button className='cp-system-metric' onClick={()=>navigate('Administration')}>
+                <Activity size={22}/><strong>{systemHealth?.openIssueCount??'—'}</strong><span>Reported problems</span></button>
             </div>
-            <div className='cp-admin-command-grid'>
-              <button className='cp-admin-command cp-approval-tile' onClick={() => {setAccountView('pending');navigate('Administration');}}>
-                <span><UserCheck size={21}/></span><strong>{operations?.pendingRoles ?? pendingRoleUsers.length}</strong><b>Pending role requests</b><small>Review faculty applications</small><ArrowUpRight size={18}/></button>
-              <button className='cp-admin-command' onClick={() => navigate('Classes')}>
-                <span><BookOpen size={21}/></span><strong>{operations?.sectionsWithoutRoom ?? 0}</strong><b>Sections needing rooms</b><small>Complete approved schedules</small><ArrowUpRight size={18}/></button>
-              <button className='cp-admin-command' onClick={() => navigate('Administration')}>
-                <span><Users size={21}/></span><strong>{operations?.incompleteProfiles ?? 0}</strong><b>Incomplete profiles</b><small>Account onboarding status</small><ArrowUpRight size={18}/></button>
-              <button className='cp-admin-command' onClick={() => navigate('Administration')}>
-                <span><QrCode size={21}/></span><strong>{operations?.activeQrSessions ?? 0}</strong><b>Active QR sessions</b><small>Campus-wide count only</small><ArrowUpRight size={18}/></button>
-            </div>
-            <div className='cp-two-column cp-monitoring-grid'>
-              <MonitoringDonut title='Campus attendance mix' eyebrow='AGGREGATE OUTCOMES'
-                parts={campusParts} subtitle='Institution-wide totals only; individual student records remain restricted.'/>
-              <MonitoringBars title='Account distribution' eyebrow='CAMPUS ROLES'
-                rows={adminRoleBars} subtitle='Current verified account roles.'/>
-            </div>
-            <div className='cp-two-column cp-admin-dashboard-grid'>
-              <section className='cp-panel'>
-                <SectionTitle eyebrow='PRIORITY INBOX' title='Account approvals'
-                  action={<button className='cp-link' onClick={() => {setAccountView('pending');navigate('Administration');}}>Manage all <ArrowUpRight size={14}/></button>}/>
-                {pendingRoleUsers.length ? pendingRoleUsers.slice(0,5).map(u=>
-                  <div className='cp-admin-queue-row' key={u.userId}>
-                    <span className='cp-user-avatar'>{u.name?.[0] || '?'}</span>
-                    <div><strong>{u.name}</strong><small>{u.email}</small></div>
-                    <Pill color='amber'>{u.roleRequest}</Pill>
-                    {u.roleRequest === 'Faculty' && <button className='cp-mini-btn'
-                      onClick={() => safeRun('approve',async()=>{await api.post('/api/admin/role',{userId:u.userId,role:'Faculty'});await refreshAdministration();showMessage('Faculty account approved.');})}>Approve</button>}
-                  </div>) : <Empty title='Approvals are clear' detail='New faculty access requests will appear here.' icon={CheckCircle2}/>}
-              </section>
-              <section className='cp-panel'>
-                <SectionTitle eyebrow='CURRENT CAMPUS RECORDS' title='Operational snapshot'/>
-                <div className='cp-admin-mini-metrics'>
-                  <div><span>Verified faculty</span><b>{operations?.roleCounts.Faculty ?? 0}</b></div>
-                  <div><span>Student accounts</span><b>{operations?.roleCounts.Student ?? 0}</b></div>
-                  <div><span>Approved sections</span><b>{summary?.courseSections ?? 0}</b></div>
-                  <div><span>Active enrollments</span><b>{operations?.enrolledStudents ?? 0}</b></div>
-                </div>
-                <div className='cp-admin-status-mix'>
-                  {Object.entries(operations?.classStatus || {}).map(([status,count])=><div key={status}>
-                    <span>{status}</span><div className='cp-admin-progress'><i style={{width:Math.round(count/Math.max(1,summary?.courseSections||0)*100)+'%'}}/></div><b>{count}</b></div>)}
-                </div>
-                <p className='cp-chart-note'>Counts are from approved records, not estimates or simulated analytics.</p>
-              </section>
-            </div>
-            <div className='cp-two-column cp-admin-dashboard-grid'>
-              <section className='cp-panel'>
-                <SectionTitle eyebrow='CLASS MANAGEMENT' title='Recently configured sections'
-                  action={<button className='cp-link' onClick={() => navigate('Classes')}>Open directory <ArrowUpRight size={14}/></button>}/>
-                {activeSections.slice(0,5).map(s=><div className='cp-class-row' key={s.id}>
-                  <span className='cp-class-icon'><BookOpen size={19}/></span>
-                  <div><strong>{s.courseCode} · {s.section}</strong><small>{s.facultyName} · {s.room||'Room unassigned'}</small></div>
-                  <button className='cp-mini-btn' onClick={() => {setForm(old=>({...old,sectionId:s.id,room:s.room,facultyId:s.facultyId,day:s.day,startTime:s.startTime,endTime:s.endTime}));setModal('edit-section');}}>Edit</button>
-                </div>)}
-                {!activeSections.length && <Empty title='No sections created' detail='Create your first course section to start academic operations.'/>}
-              </section>
-              <section className='cp-panel'>
-                <SectionTitle eyebrow='SECURITY AUDIT' title='Recent administrative actions'
-                  action={<button className='cp-link' onClick={() => navigate('Administration')}>Full audit <ArrowUpRight size={14}/></button>}/>
-                {adminEvents.slice(0,5).map(e=><div key={e.id} className='cp-update-row'>
-                  <span className='cp-update-dot'/><div><strong>{e.actionType.replace(/_/g,' ')}</strong><small>{dateFmt(e.timestamp)}</small></div>
-                </div>)}
-                {!adminEvents.length && <Empty title='No recent admin events' detail='Account approvals and class changes are audited.' icon={LockKeyhole}/>}
-              </section>
-            </div>
+            <SystemHealthGraphs health={systemHealth}/>
+            <section className='cp-panel cp-system-observability'>
+              <SectionTitle eyebrow='OBSERVABILITY' title='Reported system activity'/>
+              <p>{systemHealth?.caveat||'Only uploaded device activity can be examined.'}</p>
+              <div className='cp-system-status-pair'>
+                <span>Critical open reports <strong>{systemHealth?.highSeverityOpen??'—'}</strong></span>
+                <span>Resolved reports <strong>{systemHealth?.resolvedIssueCount??'—'}</strong></span>
+                <span>Last report <strong>{systemHealth?.lastReportedAt?dateFmt(systemHealth.lastReportedAt):'None'}</strong></span>
+              </div>
+              <button className='cp-mini-btn' onClick={()=>safeRun('refresh-health',refreshAdministration)}>
+                <RefreshCcw size={15}/> Refresh system status</button>
+            </section>
           </>
           : isStudent ? <>
             <div className='cp-two-column cp-dashboard-top'>
@@ -2119,9 +2652,6 @@ export default function App() {
                   {myPresence.status==='NOT SET'?'Status not set':myPresence.status.toLowerCase()}
                   {myPresence.updatedAt ? ' · '+dateFmt(myPresence.updatedAt) : ''}
                 </p>
-                <p className='cp-chart-note'>Students see your published status. A live QR session may temporarily show “In class.”</p>
-                <div className='cp-faculty-pulse'><span><QrCode size={17}/> {liveSessions.length} active QR sessions</span><span><FileText size={17}/> {pendingExcuses} pending excuses</span></div>
-                <button className='cp-button dark' onClick={() => navigate('Attendance')}>Manage QR attendance <ArrowRight size={16}/></button>
               </section>
             </div>
             <div className='cp-two-column cp-monitoring-grid'>
@@ -2306,6 +2836,19 @@ export default function App() {
                 <button className='cp-mini-btn' disabled={!!busy}
                   onClick={()=>{void loadFacultyRoster(facultyRoster.section.id,false);}}>
                   <RefreshCcw size={15}/> Refresh</button></div>
+              <div className='cp-roster-manual-toolbar'>
+                <div><FileCheck2 size={19}/><span><strong>Manual attendance</strong>
+                  <small>Select a class session, expand any student, and record Present, Late, Absent or Excused. Every change is audited.</small></span></div>
+                <label><span>Class meeting</span>
+                  <select value={manualSessionId} onChange={event=>setManualSessionId(event.target.value)}>
+                    <option value=''>Select a QR meeting</option>
+                    {[...facultyRoster.meetings].sort((x,y)=>y.openedAt.localeCompare(x.openedAt)).map(m=>
+                      <option key={m.id} value={m.id}>{m.meetingDate} · {m.status}</option>)}
+                  </select>
+                </label>
+              </div>
+              {!facultyRoster.meetings.length&&
+                <p className='cp-chart-note'>Open a Faculty QR session first. Attendance cannot be recorded for a class with no meeting.</p>}
               {facultyRoster.students.filter(s=>[s.name,s.studentNumber].join(' ').toLowerCase()
                 .includes(rosterSearch.trim().toLowerCase())).map(student=>{
                   const records=facultyRoster.records.filter(r=>{
@@ -2330,6 +2873,20 @@ export default function App() {
                       <ChevronRight size={18} className={open?'rotated':''}/>
                     </button>
                     {open&&<div className='cp-record-history'>
+                      <div className='cp-roster-edit-actions'>
+                        <span>Record attendance for the selected class meeting</span>
+                        <button type='button' className='cp-mini-btn primary'
+                          disabled={!manualSessionId||!!busy}
+                          onClick={()=>{
+                            const existing=facultyRoster.records.find(r=>
+                              r.studentId===student.studentId&&r.sessionId===manualSessionId);
+                            setForm(old=>({...old,studentId:student.studentId,
+                              sessionId:manualSessionId,
+                              status:existing&&['PRESENT','LATE','ABSENT','EXCUSED'].includes(existing.academicStatus)
+                                ?existing.academicStatus:'PRESENT',reason:''}));
+                            setModal('review');
+                          }}><FileCheck2 size={15}/> Set attendance</button>
+                      </div>
                       {records.length?records.map(r=><div className='cp-record-event' key={r.id}>
                         <div><strong>{dateFmt(r.capturedAt||r.receivedAt)}</strong>
                           <small>{r.verificationStatus.replace(/_/g,' ')} · {r.reviewReason||'QR attendance'}</small></div>
@@ -2425,8 +2982,12 @@ export default function App() {
               <h3>{group.title}</h3>
               {group.items.map(n=><button type='button' key={n.id}
                 className={'cp-notification '+(n.read?'read':'')}
-                onClick={()=>safeRun('mark-read',async()=>{
-                  if(!n.read){await api.post('/api/notices/'+n.id+'/read',{});await refreshPage('Notifications');}
+                onClick={()=>safeRun('open-notification',async()=>{
+                  setExpandedNotice(n);setModal('notification-detail');
+                  if(!n.read){
+                    await api.post('/api/notices/'+n.id+'/read',{});
+                    await refreshPage('Notifications');
+                  }
                 })}>
                 <span className='cp-request-icon'>{n.kind==='attendance'?<ScanLine size={19}/>:
                   n.kind==='class'?<BookOpen size={19}/>:
@@ -2439,113 +3000,107 @@ export default function App() {
           </section>
         </>}
 
-        {page === 'Administration' && isAdmin && <>
-          <SectionTitle eyebrow='CAMPUS OPERATIONS' title='Administrator workspace'
-            subtitle='Role approvals, class reference management, audit activity and aggregate-only reporting.'
-            action={<button className='cp-button dark' onClick={() => setModal('create-section')}><Plus size={16}/> New section</button>}/>
+        {page==='Administration'&&isAdmin&&<>
+          <SectionTitle eyebrow='SYSTEM OPERATIONS' title='Health, access & incident monitoring'
+            subtitle='Review crash reports, offline synchronization, connectivity and account issues. Academic records remain with faculty.'/>
+          <SystemHealthGraphs health={systemHealth}/>
+          <section className='cp-panel cp-admin-invites-panel'>
+            <div className='cp-admin-invites-head'>
+              <div><strong>User invitations</strong>
+                <small>Invite students and faculty using verified email addresses</small></div>
+              <button type='button' className='cp-mini-btn primary' onClick={()=>{
+                setForm(old=>({...old,inviteUserEmail:'',inviteUserRole:'Student'}));
+                setModal('invite-user');
+              }}><Plus size={16}/> Invite user</button>
+            </div>
+            {userInvites.filter(inv=>inv.status==='PENDING').map(inv=>
+              <div key={inv.id} className='cp-admin-invite-row'>
+                <span><strong>{inv.email}</strong><small>{inv.role} · Expires {dateFmt(inv.expiresAt)}</small></span>
+                <Pill color='amber'>Pending</Pill>
+                <button type='button' className='cp-mini-btn danger'
+                  onClick={()=>safeRun('revoke-user',async()=>{
+                    await api.post('/api/admin/user-invites/revoke',{email:inv.email});
+                    await refreshAdministration();showMessage('User invitation revoked.');
+                  })}>Revoke</button>
+              </div>)}
+            {!userInvites.some(inv=>inv.status==='PENDING')&&
+              <p className='cp-admin-invite-hint'>No pending user invitations.</p>}
+          </section>
           <section className='cp-panel cp-admin-invites-panel'>
             <div className='cp-admin-invites-head'>
               <div><strong>Administrator invitations</strong>
-                <small>Verified email required · Only existing administrators can invite</small></div>
+                <small>Existing administrators can authorize an additional verified account</small></div>
               <button type='button' className='cp-mini-btn primary' onClick={()=>{
                 update('inviteEmail','');setModal('invite-admin');
-              }}><Plus size={15}/> Invite admin</button>
+              }}><Plus size={16}/> Invite administrator</button>
             </div>
-            {adminInvites.filter(inv=>inv.status!=='REVOKED').length>0&&
-              <div className='cp-admin-invites-list'>
-                {adminInvites.filter(inv=>inv.status!=='REVOKED').map(inv=>
-                  <div key={inv.id} className='cp-admin-invite-row'>
-                    <span><strong>{inv.email}</strong>
-                      <small>{inv.status==='ACCEPTED'?'Active administrator':'Expires '+dateFmt(inv.expiresAt)}</small></span>
-                    <Pill color={inv.status==='ACCEPTED'?'green':'amber'}>{inv.status}</Pill>
-                    <button type='button' className='cp-mini-btn danger' onClick={()=>safeRun('revoke-admin',async()=>{
-                      if(!window.confirm('Revoke administrator access for '+inv.email+'?'))return;
-                      await api.post('/api/admin/invite/revoke',{email:inv.email});
-                      await refreshAdministration();showMessage('Administrator invitation revoked.');
-                    })}>Revoke</button>
-                  </div>)}
-              </div>}
-            <p className='cp-admin-invite-hint'>Invitees sign in using their exact email.
-              Share the ClassPulse link with them.</p>
+            {adminInvites.filter(inv=>inv.status!=='REVOKED').map(inv=>
+              <div key={inv.id} className='cp-admin-invite-row'>
+                <span><strong>{inv.email}</strong>
+                  <small>{inv.status==='ACCEPTED'?'Accepted':'Expires '+dateFmt(inv.expiresAt)}</small></span>
+                <Pill color={inv.status==='ACCEPTED'?'green':'amber'}>{inv.status}</Pill>
+                <button type='button' className='cp-mini-btn danger'
+                  onClick={()=>safeRun('revoke-admin',async()=>{
+                    if(!window.confirm('Revoke administrator access for '+inv.email+'?'))return;
+                    await api.post('/api/admin/invite/revoke',{email:inv.email});
+                    await refreshAdministration();showMessage('Administrator access revoked.');
+                  })}>Revoke</button>
+              </div>)}
+            <p className='cp-admin-invite-hint'>Invited administrators sign in using the exact approved email.</p>
           </section>
-          <section className='cp-panel cp-admin-import-banner'>
-            <div><strong>Academic data imports</strong><small>CSV validation · Audited changes</small></div>
-            <div className='cp-inline-actions'>
-              <button className='cp-mini-btn' onClick={()=>{
-                setImportKind('rooms');setImportRows([]);setImportReport(null);setModal('admin-import');
-              }}><Plus size={15}/> Import CSV</button>
-              <button className='cp-mini-btn' onClick={()=>setModal('admin-rooms')}>
-                <BookOpen size={15}/> Rooms ({adminRooms.length})</button>
+          <section className='cp-panel cp-admin-accounts'>
+            <SectionTitle eyebrow='ACCOUNT ACCESS' title='User directory'
+              subtitle='Find registration and access problems; academic records remain with faculty.'/>
+            <div className='cp-admin-filter-bar'>
+              <label><Search size={16}/><input aria-label='Filter account directory'
+                value={accountQuery} onChange={ev=>setAccountQuery(ev.target.value)}
+                placeholder='Search by name or email'/></label>
+              <div className='cp-admin-filter-tabs'>
+                {([
+                  ['pending','Pending'],['all','All'],['Faculty','Faculty'],['Student','Students']
+                ] as const).map(([key,label])=><button key={key}
+                  className={accountView===key?'selected':''} onClick={()=>setAccountView(key)}>
+                  {label}</button>)}
+              </div>
+            </div>
+            <div className='cp-admin-users'>
+              {filteredUsers.slice(0,90).map(user=><div className='cp-admin-user' key={user.userId}>
+                <span className='cp-user-avatar'>{user.name?.[0]||'?'}</span>
+                <div><strong>{user.name}</strong><small>{user.email} · {user.role}</small></div>
+                {user.onboardingComplete===false&&<span className='cp-account-help'>Setup pending</span>}
+              </div>)}
+              {!filteredUsers.length&&<Empty title='No matching accounts'
+                detail='Try a different filter or search.' icon={Users}/>}
             </div>
           </section>
-          <div className='cp-admin-summary-rail'>
-            <div><span>Accounts</span><strong>{summary?.accounts ?? '—'}</strong></div>
-            <div><span>Faculty requests</span><strong>{operations?.pendingRoles ?? '—'}</strong></div>
-            <div><span>Course sections</span><strong>{summary?.courseSections ?? '—'}</strong></div>
-            <div><span>Aggregate attendance</span><strong>{summary?.totalRecords ?? '—'}</strong></div>
-          </div>
-          <div className='cp-two-column cp-admin-management'>
-            <section className='cp-panel'>
-              <SectionTitle eyebrow='ACCOUNT DIRECTORY' title='Manage roles and requests'/>
-              <div className='cp-admin-filter-bar'>
-                <label><Search size={16}/><input aria-label='Filter users by name, email, or role'
-                  value={accountQuery} onChange={e=>setAccountQuery(e.target.value)} placeholder='Filter accounts'/></label>
-                <div className='cp-admin-filter-tabs'>
-                  {([
-                    ['pending','Pending'],['all','All'],['Faculty','Faculty'],['Student','Students']
-                  ] as const).map(([key,label])=><button key={key} onClick={()=>setAccountView(key)}
-                    className={accountView===key?'selected':''}>{label}</button>)}
-                </div>
-              </div>
-              <div className='cp-admin-users'>
-                {filteredUsers.slice(0,70).map(u=><div key={u.userId} className='cp-admin-user'>
-                  <span className='cp-user-avatar'>{u.name?.[0]||'?'}</span>
-                  <div><strong>{u.name}</strong><small>{u.email} · {u.role}</small>
-                    {u.roleRequest && <Pill color='amber'>Requested {u.roleRequest}</Pill>}
-                  </div>
-                  {u.role==='Student' && u.roleRequest==='Faculty' && <button className='cp-mini-btn'
-                    disabled={!!busy} onClick={()=>safeRun('approve',async()=>{
-                      await api.post('/api/admin/role',{userId:u.userId,role:'Faculty'});
-                      await refreshAdministration();showMessage('Faculty access approved.');
-                    })}>Approve</button>}
-                  {u.role==='Faculty' && <button className='cp-mini-btn'
-                    disabled={!!busy} onClick={()=>safeRun('revoke',async()=>{
-                      if(!window.confirm('Change this Faculty account back to Student?'))return;
-                      await api.post('/api/admin/role',{userId:u.userId,role:'Student'});
-                      await refreshAdministration();showMessage('Account role changed to Student.');
-                    })}>Set Student</button>}
-                </div>)}
-                {!filteredUsers.length && <Empty title='Nothing in this view' detail='Try All accounts or change your search.' icon={Users}/>}
-              </div>
-              {filteredUsers.length>70 && <p className='cp-chart-note'>Showing the first 70 matching accounts. Refine your search to narrow the list.</p>}
-            </section>
-            <section className='cp-admin-side-stack'>
-              <section className='cp-panel'>
-                <SectionTitle eyebrow='INSTITUTION REPORTS' title='Attendance totals'/>
-                {summary && <div className='cp-aggregate-list'>{Object.entries(summary.aggregate).map(([name,count])=><div key={name}><span>{name}</span><strong>{count}</strong></div>)}</div>}
-                <button className='cp-button dark' onClick={()=>summary && csvExport('classpulse-campus-summary.csv',
-                  Object.entries(summary.aggregate).map(([Status,Total])=>({Status,Total})))}>
-                  <Download size={16}/> Export campus summary</button>
-                <div className='cp-privacy-note'><ShieldCheck size={17}/> Only aggregate totals—no individual student attendance.</div>
-              </section>
-              <section className='cp-panel'>
-                <SectionTitle eyebrow='REFERENCE COMPLETENESS' title='Data quality checks'/>
-                <div className='cp-admin-mini-metrics'>
-                  <div><span>Profiles to complete</span><b>{operations?.incompleteProfiles ?? '—'}</b></div>
-                  <div><span>Sections without rooms</span><b>{operations?.sectionsWithoutRoom ?? '—'}</b></div>
-                  <div><span>Enrollment records</span><b>{operations?.enrolledStudents ?? '—'}</b></div>
-                  <div><span>Availability updates</span><b>{operations?.publishedAvailability ?? '—'}</b></div>
-                </div>
-                <button className='cp-mini-btn' onClick={()=>navigate('Classes')}>Maintain section records <ArrowUpRight size={14}/></button>
-              </section>
-            </section>
-          </div>
+          <section className='cp-panel cp-admin-issues'>
+            <SectionTitle eyebrow='SYSTEM DIAGNOSTICS' title='Reported technical problems'/>
+            <p className='cp-chart-note'>{systemHealth?.caveat||
+              'Devices that are offline cannot report status until they reconnect.'}</p>
+            {systemHealth?.openIssues.length?systemHealth.openIssues.map(issue=>
+              <article className='cp-system-issue' key={issue.id}>
+                <div><strong>{issue.kind.toUpperCase()} · {issue.severity}</strong>
+                  <time>{dateFmt(issue.createdAt)}</time></div>
+                <p>{issue.message}</p>
+                <button type='button' className='cp-mini-btn'
+                  onClick={()=>safeRun('resolve-issue',async()=>{
+                    await api.post('/api/admin/system-issues/'+issue.id+'/resolve',{});
+                    await refreshAdministration();showMessage('Issue marked resolved.');
+                  })}><Check size={15}/> Mark resolved</button>
+              </article>):
+              <Empty title='No open system reports'
+                detail='Reports appear here once users submit them.' icon={CheckCircle2}/>}
+          </section>
           <section className='cp-panel cp-admin-audit'>
-            <SectionTitle eyebrow='ACCOUNTABILITY' title='Administrative audit trail'
-              subtitle='Role approvals, reference changes and administrative access actions.'/>
-            {adminEvents.length ? adminEvents.slice(0,35).map(e=><div className='cp-admin-audit-row' key={e.id}>
-              <LockKeyhole size={15}/><span>{e.actionType.replace(/_/g,' ')}</span><time>{dateFmt(e.timestamp)}</time></div>) :
-              <Empty title='No administrative actions yet' detail='Access and changes are recorded here.'/>}
+            <SectionTitle eyebrow='SECURITY' title='Administrative audit trail'
+              subtitle='Recorded access, invitation and administrative account changes.'/>
+            {adminEvents.length?adminEvents.slice(0,35).map(event=>
+              <div className='cp-admin-audit-row' key={event.id}>
+                <LockKeyhole size={15}/>
+                <span>{event.actionType.replace(/_/g,' ')}</span>
+                <time>{dateFmt(event.timestamp)}</time>
+              </div>):<Empty title='No administrative events yet'
+                detail='Important administrator actions appear here.'/>}
           </section>
         </>}
 
@@ -2623,27 +3178,65 @@ export default function App() {
                   </div>
                 </div>
               </div>
-              <div className='cp-id-controls'>
-                <div role='group' aria-label='Digital ID card side' className='cp-id-switch'>
-                  <button type='button' aria-pressed={!idCardBack} className={!idCardBack?'active':''}
-                    onClick={()=>setIdCardBack(false)}>Card front</button>
-                  <button type='button' aria-pressed={idCardBack} className={idCardBack?'active':''}
-                    onClick={()=>setIdCardBack(true)}>Card details</button>
-                </div>
+              <div className='cp-id-controls cp-card-guide' role='note'>
+                <RefreshCcw size={15}/> Tap the campus card to flip · Tap again to return
               </div>
               <div className='cp-id-actions'>
                 <label className='cp-id-photo-change'><Plus size={16}/> Change profile photo
                   <input type='file' accept='image/jpeg,image/png,image/webp'
-                    onChange={e=>setPhotoFile(e.target.files?.[0]||null)}/></label>
+                    onChange={ev=>{
+                      const selected=ev.target.files?.[0]||null;
+                      if(selected&&(!['image/jpeg','image/png','image/webp'].includes(selected.type)||
+                        selected.size>15_000_000)){
+                        showMessage('Choose a JPG, PNG, or WebP photo under 15 MB.');
+                        ev.target.value='';return;
+                      }
+                      setPhotoReady(false);setPhotoFile(selected);
+                      setPhotoZoom(1);setPhotoPanX(0);setPhotoPanY(0);
+                      ev.target.value='';
+                    }}/></label>
                 <button type='button' className='cp-id-copy' disabled={!profile?.studentNumber}
                   onClick={()=>safeRun('copy-academic-id',async()=>{
                     await navigator.clipboard.writeText(profile?.studentNumber||'');
                     showMessage('Academic identifier copied.');
                   })}><FileText size={16}/> Copy campus ID</button>
               </div>
-              {photoFile&&<div className='cp-id-photo-pending' role='status'>
-                <span>{photoFile.name}</span><button className='cp-button dark' disabled={!!busy}
-                  onClick={()=>safeRun('photo',uploadPhoto)}>Save new photo <Check size={15}/></button>
+              {photoFile&&<div className='cp-photo-editor'>
+                <div className='cp-photo-editor-heading'><strong>Adjust your picture</strong>
+                  <span>Drag to reposition · slide to zoom · preview before saving</span></div>
+                <canvas ref={photoCropCanvas} width={320} height={320} className='cp-photo-preview'
+                  role='img' aria-label='Drag to position your square profile picture'
+                  onPointerDown={ev=>{
+                    photoDragRef.current={x:ev.clientX,y:ev.clientY,panX:photoPanX,panY:photoPanY};
+                    ev.currentTarget.setPointerCapture(ev.pointerId);
+                  }}
+                  onPointerMove={ev=>{
+                    const start=photoDragRef.current;
+                    if(!start)return;
+                    const bounds=ev.currentTarget.getBoundingClientRect();
+                    const distance=Math.max(80,bounds.width);
+                    setPhotoPanX(Math.max(-100,Math.min(100,start.panX-(ev.clientX-start.x)/distance*150)));
+                    setPhotoPanY(Math.max(-100,Math.min(100,start.panY-(ev.clientY-start.y)/distance*150)));
+                  }}
+                  onPointerUp={ev=>{
+                    photoDragRef.current=null;
+                    if(ev.currentTarget.hasPointerCapture(ev.pointerId))ev.currentTarget.releasePointerCapture(ev.pointerId);
+                  }}
+                  onPointerCancel={()=>{photoDragRef.current=null;}}/>
+                <label>Zoom · {Math.round(photoZoom*100)}%
+                  <input type='range' min='1' max='3' step='.05' value={photoZoom}
+                    onChange={ev=>setPhotoZoom(Number(ev.target.value))}/>
+                </label>
+                <button type='button' className='cp-mini-btn cp-photo-reset'
+                  onClick={()=>{setPhotoZoom(1);setPhotoPanX(0);setPhotoPanY(0);}}>
+                  <RefreshCcw size={14}/> Reset crop
+                </button>
+                <div className='cp-photo-editor-actions'>
+                  <button type='button' className='cp-mini-btn'
+                    onClick={()=>{setPhotoFile(null);setPhotoReady(false);}}>Cancel</button>
+                  <button type='button' className='cp-button dark' disabled={!!busy||!photoReady}
+                    onClick={()=>safeRun('photo',uploadPhoto)}>Use this photo <Check size={15}/></button>
+                </div>
               </div>}
               <div className='cp-id-completion'>
                 <div><span>PROFILE READINESS</span><strong>{cardReadiness} of 5 details</strong></div>
@@ -2728,9 +3321,22 @@ export default function App() {
                     <strong>Export schedule <ArrowUpRight size={14}/></strong>
                   </button>}
                   {!isAdmin && <p className='cp-settings-helper'>Calendar export includes a 15-minute alert. For reliable Android system alarms, import the .ics into the separate native companion app. Web notifications depend on browser/device support.</p>}
-                  <button onClick={()=>safeRun('notify',async()=>{await notifications.subscribe();showMessage('Notification setup requested.');})}>
-                    <span><Bell size={18}/> Academic notifications</span><strong>Enable <ArrowUpRight size={14}/></strong>
-                  </button>
+                  {isStudent&&<button onClick={()=>safeRun('notify',async()=>{
+                    const result=await notifications.subscribe();
+                    showMessage(result);
+                  })}>
+                    <span><Bell size={18}/> Phone and home-screen class alerts</span>
+                    <strong>{typeof Notification!=='undefined'&&Notification.permission==='granted'?'Manage':'Enable'} <ArrowUpRight size={14}/></strong></button>}
+                  {isStudent&&<p className='cp-settings-helper'>
+                    Class updates appear in-app while ClassPulse is open. For alerts on your phone's home screen,
+                    install ClassPulse as a Home Screen app, then tap Enable and allow notifications.
+                    iOS requires iOS 16.4 or newer and a Home Screen installation; browser and battery settings affect delivery.
+                  </p>}
+                  <button type='button' onClick={()=>{
+                    setForm(old=>({...old,issueKind:'other',issueMessage:''}));
+                    setModal('report-issue');
+                  }}><span><Activity size={18}/> Report a technical issue</span>
+                    <strong>Report <ArrowUpRight size={14}/></strong></button>
 
                   <button onClick={()=>safeRun('sign-out',signOut)}>
                     <span><LogOut size={18}/> Sign out</span><strong>Exit <ArrowUpRight size={14}/></strong>
@@ -2745,21 +3351,78 @@ export default function App() {
               </section>
         </>}
       </main>
-      <footer className='cp-footer'>CLASSPULSE / MSU MAIN CAMPUS <span>Designed for students and faculty. Protected by role-based access.</span></footer>
+      <footer className='cp-footer'><span>CLASSPULSE · MSU MAIN CAMPUS</span>
+        <small>Secure student and faculty access</small></footer>
     </div>
-    <nav className='cp-mobile-dock' aria-label='Quick navigation'>{pages[role].slice(0, 5).map(({ page: item, icon: Icon, label }) => <button type='button' aria-label={label} title={label} key={item} className={page === item ? 'active' : ''} onClick={() => navigate(item)}><Icon size={18}/><span>{label}</span></button>)}</nav>
+    <nav className='cp-mobile-dock' aria-label='Quick navigation'>{pages[role].slice(0, 5).map(({ page: item, icon: Icon, label }) => <button type='button' aria-label={label} title={label} key={item} className={page === item ? 'active' : ''} onClick={() => navigate(item)}><Icon size={18} aria-hidden='true'/><span>{label}</span></button>)}</nav>
 
     {modal && <div className='cp-modal-backdrop' onClick={() => { closeScanner(); }}><section className='cp-modal' onClick={(e) => e.stopPropagation()}><div className='cp-modal-head'><div><span>CLASSPULSE / ACTION</span><h2>{{
       join:'Join an enrolled section', 'create-section':'Create a class section', 'edit-section':'Edit approved class',
       'faculty-create':'Add a subject', 'faculty-edit':'Customize subject', 'faculty-roster':'My student roster',
       'admin-import':'CSV Import', 'admin-rooms':'Campus Rooms',
-      'invite-admin':'Invite administrator', 'delete-account':'Delete account',
+      'invite-admin':'Invite administrator','invite-user':'Invite user',
+      'notification-detail':'Notification','report-issue':'Report technical issue',
+      'delete-account':'Delete account',
       status:'Publish class update',
       scan:'Scan attendance QR', qr:'Live class QR session', roster:'Class attendance roster', review:'Correct attendance',
       excuse:'Submit a digital excuse', 'excuse-decision':'Faculty excuse decision',
       slot:'Publish consultation dates', booking:'Request a consultation', 'booking-decision':'Confirm or reject booking',
     }[modal] || 'ClassPulse'}</h2></div><button className='cp-icon-button' onClick={closeScanner}><X size={18}/></button></div>
     <div className='cp-modal-body'>
+      {modal==='notification-detail'&&expandedNotice&&<section className='cp-notice-detail'>
+        <span className='cp-notice-date'>{dateFmt(expandedNotice.createdAt)}</span>
+        <h3>{expandedNotice.title}</h3>
+        <p>{expandedNotice.body}</p>
+        <button type='button' className='cp-button dark full' onClick={()=>{
+          const category=expandedNotice.kind;
+          setModal('');setExpandedNotice(null);
+          navigate(category==='consultation'?'Consultations':
+            category==='excuse'?'Excuses':category==='attendance'?'Attendance':
+            category==='class'?'Classes':'Notifications');
+        }}>Open related page <ArrowRight size={16}/></button>
+      </section>}
+      {modal==='invite-user'&&isAdmin&&<>
+        <label className='cp-field'><span>Verified email to invite</span>
+          <input type='email' autoComplete='email' value={form.inviteUserEmail||''}
+            onChange={ev=>update('inviteUserEmail',ev.target.value)}/></label>
+        <label className='cp-field'><span>Account role</span>
+          <select value={form.inviteUserRole||'Student'}
+            onChange={ev=>update('inviteUserRole',ev.target.value)}>
+            <option value='Student'>Student</option><option value='Faculty'>Faculty</option>
+          </select></label>
+        <p className='cp-modal-help'>This creates a seven-day invitation. Share the ClassPulse
+          sign-in link; the recipient must verify their own email. Passwords are not created by administrators.</p>
+        <button type='button' className='cp-button dark full' disabled={!!busy||
+          !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test((form.inviteUserEmail||'').trim())}
+          onClick={()=>safeRun('invite-user',async()=>{
+            await api.post('/api/admin/user-invites',{
+              email:(form.inviteUserEmail||'').trim(),role:form.inviteUserRole||'Student',
+            });
+            setModal('');await refreshAdministration();
+            showMessage('Invitation created. Share the ClassPulse sign-in link with this address.');
+          })}>Create invitation <ArrowRight size={16}/></button>
+      </>}
+      {modal==='report-issue'&&<>
+        <label className='cp-field'><span>Issue category</span>
+          <select value={form.issueKind||'other'}
+            onChange={ev=>update('issueKind',ev.target.value)}>
+            <option value='crash'>App crash</option><option value='network'>Connection</option>
+            <option value='sync'>Offline synchronization</option>
+            <option value='account'>Account access</option><option value='other'>Other issue</option>
+          </select></label>
+        <label className='cp-field'><span>What happened?</span>
+          <textarea rows={4} value={form.issueMessage||''}
+            onChange={ev=>update('issueMessage',ev.target.value)}
+            placeholder='Describe the problem. Do not enter passwords or private student data.'/></label>
+        <button className='cp-button dark full' type='button'
+          disabled={!!busy||(form.issueMessage||'').trim().length<8}
+          onClick={()=>safeRun('report-issue',async()=>{
+            await api.post('/api/system/issue',{
+              kind:form.issueKind||'other',message:form.issueMessage,severity:'MEDIUM'
+            });
+            setModal('');showMessage('System issue submitted to the administrator.');
+          })}>Send report <ArrowRight size={15}/></button>
+      </>}
       {modal==='invite-admin'&&isAdmin&&<>
         <label className='cp-field'><span>Administrator email</span>
           <input type='email' inputMode='email' autoComplete='email'
@@ -3006,10 +3669,14 @@ export default function App() {
             The camera recognizes the signed QR and records attendance automatically. Offline scans are saved for later server verification and faculty review.</p></div>
         </div>
       </>}
-      {modal === 'qr' && currentSession && <><div className='cp-qr-paper'>{qrToken ? <QRCodeSVG value={qrToken} size={244} level='M'/> : <div className='cp-spinner'/>}</div><div className='cp-qr-timer'><span className='cp-live-dot'/> Signed QR rotates every 15 seconds · refresh in {15 - (Math.floor(tick % 15))}s</div><p className='cp-modal-help'>Only scanned, enrolled students can create attendance records. No QR session exists unless faculty explicitly opens one.</p><div className='cp-inline-actions'><button className='cp-mini-btn' onClick={() => safeRun('roster', async () => rosterModal(currentSession))}>Open roster</button><button className='cp-mini-btn danger' onClick={() => safeRun('close', async () => { await api.post('/api/sessions/' + currentSession.id + '/close', {}); setModal(''); await refreshDashboard(); showMessage('Attendance session closed.'); })}>Close session</button></div></>}
-      {modal === 'roster' && currentSession && <><div className='cp-roster'>{roster.map((student) => <div key={student.studentId} className='cp-roster-row'>{student.photo ? <img src={student.photo} alt='Verified profile reference'/> : <span className='cp-student-placeholder'><Users size={18}/></span>}<div><strong>{student.name}</strong><small>{student.studentNumber || student.studentId.slice(0,8)}</small></div><Pill color={colorFor(student.attendance?.academicStatus || '')}>{student.attendance?.academicStatus || 'NO SCAN'}</Pill>{student.attendance && <button className='cp-mini-btn' onClick={() => { update('studentId', student.studentId); update('sessionId', currentSession.id); update('status', student.attendance?.academicStatus || 'ABSENT'); setModal('review'); }}>Review</button>}</div>)}</div><button className='cp-mini-btn' onClick={() => safeRun('finalize', async () => { const r = await api.post('/api/sessions/' + currentSession.id + '/finalize', {}); showMessage((r.data as { ready: boolean }).ready ? 'Eligible missing attendance records finalized.' : 'The 12-hour post-class window has not elapsed.'); await rosterModal(currentSession); })}>Finalize absence after 12-hour window</button></>}
+      {modal === 'qr' && currentSession && <><div className='cp-qr-paper'>{qrToken ? <QRCodeSVG value={qrToken} size={244} level='M'/> : <div className='cp-spinner'/>}</div><div className='cp-qr-timer'><span className='cp-live-dot'/> Signed QR rotates every 15 seconds · refresh in {15 - (Math.floor(tick % 15))}s</div><p className='cp-modal-help'>You can reopen this QR for the same class meeting at any time within the scheduled window. A new student's valid scan also enrolls them, pending Faculty photo verification.</p><div className='cp-inline-actions'><button className='cp-mini-btn' onClick={() => safeRun('roster', async () => rosterModal(currentSession))}>Open roster</button><button className='cp-mini-btn danger' onClick={() => safeRun('close', async () => { await api.post('/api/sessions/' + currentSession.id + '/close', {}); setModal(''); await refreshDashboard(); showMessage('Attendance session closed.'); })}>Close session</button></div></>}
+      {modal === 'roster' && currentSession && <><div className='cp-roster'>{roster.map((student) => <div key={student.studentId} className='cp-roster-row'>{student.photo ? <img src={student.photo} alt='Verified profile reference'/> : <span className='cp-student-placeholder'><Users size={18}/></span>}<div><strong>{student.name}</strong><small>{student.studentNumber || student.studentId.slice(0,8)}</small></div><Pill color={colorFor(student.attendance?.academicStatus || '')}>{student.attendance?.academicStatus || 'NO SCAN'}</Pill><button className='cp-mini-btn' onClick={() => {
+  setForm(old=>({...old,studentId:student.studentId,sessionId:currentSession.id,
+    status:student.attendance&&['PRESENT','LATE','ABSENT','EXCUSED'].includes(student.attendance.academicStatus)
+      ?student.attendance.academicStatus:'PRESENT',reason:''}));
+  setModal('review');}}>{student.attendance?'Correct':'Mark'}</button></div>)}</div><button className='cp-mini-btn' onClick={() => safeRun('finalize', async () => { const r = await api.post('/api/sessions/' + currentSession.id + '/finalize', {}); showMessage((r.data as { ready: boolean }).ready ? 'Eligible missing attendance records finalized.' : 'The 12-hour post-class window has not elapsed.'); await rosterModal(currentSession); })}>Finalize absence after 12-hour window</button></>}
       {modal === 'review' && <>
-        <p className='cp-modal-help'>Corrections change the academic status, not the original QR scan evidence. A reason is required and saved in the audit trail.</p>
+        <p className='cp-modal-help'>Set Present, Late, Absent or Excused manually, or correct an existing QR record. A reason is required; original QR evidence is preserved and every change is audited.</p>
         <Field label='Corrected academic status' name='status' form={form} update={update}>
           {['PRESENT','LATE','ABSENT','EXCUSED'].map((s)=><option key={s}>{s}</option>)}
         </Field>
@@ -3024,7 +3691,7 @@ export default function App() {
             setModal('');
             if(selectedSubjectId)await loadFacultyRoster(selectedSubjectId,false);
             await refreshPage('Attendance');
-            showMessage('Correction saved with a complete audit entry.');
+            showMessage('Attendance saved with a complete Faculty audit entry.');
           })}><FileCheck2 size={17}/> Save audited correction</button>
       </>}
       {modal==='excuse'&&<>
@@ -3131,6 +3798,25 @@ export default function App() {
       {modal === 'booking-decision' && <><Field label='Decision note (optional)' name='reason' form={form} update={update}/><div className='cp-inline-actions'><button className='cp-button dark' onClick={() => safeRun('confirm', async () => { await action('/api/bookings/' + form.bookingId + '/decision', { status: 'CONFIRMED', reason: form.reason }, 'Consultations'); setModal(''); })}>Confirm booking</button><button className='cp-mini-btn danger' onClick={() => safeRun('reject-booking', async () => { await action('/api/bookings/' + form.bookingId + '/decision', { status: 'REJECTED', reason: form.reason }, 'Consultations'); setModal(''); })}>Reject</button></div></>}
       {busy && <div className='cp-modal-progress'><span className='cp-spinner small'/> Processing your request…</div>}
     </div></section></div>}
+    {priorityNotice && <div className='cp-class-alert-backdrop' role='presentation'>
+      <section className='cp-class-alert' role='alertdialog'
+        aria-label='Important class status update' aria-live='assertive'>
+        <div className='cp-class-alert-icon'><Bell size={27}/><i/><i/></div>
+        <span className='cp-class-alert-kicker'>CLASS STATUS ALERT</span>
+        <h2>{priorityNotice.title}</h2>
+        <p>{priorityNotice.body}</p>
+        <small>{dateFmt(priorityNotice.createdAt)} · Faculty announcement</small>
+        <div className='cp-class-alert-actions'>
+          <button className='cp-button dark' onClick={()=>safeRun('read-update',async()=>{
+            const current=priorityNotice;
+            setPriorityNotice(null);
+            await api.post('/api/notices/'+current.id+'/read',{});
+            navigate('Notifications');
+          })}>Open announcement <ArrowRight size={16}/></button>
+          <button className='cp-mini-btn' onClick={()=>setPriorityNotice(null)}>Dismiss</button>
+        </div>
+      </section>
+    </div>}
     {message && <div className='cp-toast'><span><Activity size={16}/></span>{message}<button onClick={() => setMessage('')}><X size={15}/></button></div>}
   </div>;
 }
