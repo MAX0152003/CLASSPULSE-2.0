@@ -371,7 +371,12 @@
       "green-centered ClassPulse logo",
       "real admin operational health",
       "Admin day codes MW TTH F S A",
-      "role segregation faculty schedule and registrar official COR boundary"
+      "role segregation faculty schedule and registrar official COR boundary",
+      "iPhone safe area: sticky header does not overlap device status bar",
+      "Five-item floating navigation wraps labels into two lines without collisions",
+      "Date range filters never overlap or horizontally scroll on 320–430 px iPhones",
+      "Footer and availability controls are not covered by floating navigation",
+      "Weekly cards use compact no-class height and avoid redundant title/status"
     ],
     "description": "Checks that role selection never bypasses authorization and all roles use adaptive navigation.",
     "steps": [
@@ -386,7 +391,13 @@
       "Confirm individual attendance is unavailable to Administrator",
       "Open the responsive tablet layout and verify workspace navigation remains usable",
       "Create and edit sections with MW, TTH, F, S and A codes in both Faculty and Administrator forms.",
-      "Create a Sunday class A as Admin; verify a faculty schedule collision and an occupied room collision are rejected."
+      "Create a Sunday class A as Admin; verify a faculty schedule collision and an occupied room collision are rejected.",
+      "On iPhone Safari or installed PWA at 320, 375, 390 and 430 CSS px, inspect faculty Student Records: From and Until fields must be fully separate, with no horizontal overflow or stacked native date control clipping.",
+      "On faculty Overview, Student Records, Excuses, and Subjects, inspect floating bottom navigation: icons and 2-line labels must not overlap, and the selected item must not obscure nearby links.",
+      "Scroll to the very end of the Faculty Overview and Excuses screens; bottom availability actions, last letter and footer must remain fully reachable above the floating dock.",
+      "Scroll Subjects until week title reaches the iOS status bar; toolbar stays visible below the device status indicators, and no headings disappear behind it.",
+      "Swipe weekly class cards left/right and use weekday buttons with no classes; ensure day card is compact but all content visible, with no extra repeated day heading.",
+      "Rotate iPhone to landscape and verify fixed navigation is at the right edge with icon-only controls, while the one-column drawer scrolls vertically."
     ],
     "expected": "Privileges are enforced on the backend, and student-level attendance details are not accessible to Administrator users. The verified authorized email is elevated to Administrator while unauthorised emails remain non-admin. Administrator can edit approved class reference data, rotate join codes, and manage role approvals without seeing student-level attendance."
   }

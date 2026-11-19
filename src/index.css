@@ -2639,3 +2639,245 @@ textarea:focus-visible {outline:2px solid var(--focus-ring);outline-offset:3px;}
   .cp-notice-detail,.cp-drawer-overlay,.cp-drawer{animation:none!important;}
 }
 /* End ClassPulse 2.0 non-deployed UX enhancement */
+
+
+/* MOBILE QA PATCH 2026-11-19
+ * Screenshot regressions: native iOS date control overflow, crowded dock labels,
+ * content hidden behind the dock, duplicate schedule header, and safe-area clipping.
+ * Keep academic data, QR validation and role behavior unchanged.
+ */
+.cp-record-filters,
+.cp-record-filters .cp-field,
+.cp-record-filters .cp-field input,
+.cp-record-filters .cp-field select {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+.cp-record-filters .cp-field { display:grid; grid-template-columns:minmax(0,1fr);gap:6px; }
+.cp-record-filters .cp-field > span {display:block;min-width:0;overflow-wrap:break-word;}
+.cp-record-filters input[type='date'] {
+  display:block;
+  width:100%;
+  min-width:0;
+  max-width:100%;
+  min-height:45px;
+  box-sizing:border-box;
+  font:inherit;
+  color:var(--text);
+  background:var(--panel-muted);
+  padding-inline:12px;
+  -webkit-appearance:none;
+  appearance:none;
+}
+.cp-record-filters input[type='date']::-webkit-date-and-time-value {
+  min-height:1em;
+  text-align:left;
+  overflow:hidden;
+}
+.cp-record-filters input[type='date']::-webkit-calendar-picker-indicator{
+  opacity:.82;
+}
+.cp-deck-titlebar h4{line-height:1.18;overflow-wrap:break-word;}
+.cp-deck-titlebar p{line-height:1.35;}
+.cp-deck-classes{min-height:0;}
+.cp-letter-paper-head{min-width:0;}
+.cp-letter-paper-heading{overflow-wrap:anywhere;}
+/* Preserve document flow; don't stretch short pages just to pin the footer. */
+.cp-main{min-width:0;}
+.cp-content{min-width:0;flex:0 0 auto;}
+.cp-footer{flex:0 0 auto;position:relative;bottom:auto;min-width:0;}
+
+@media (max-width:1100px) and (min-width:701px){
+  .cp-record-filters{
+    grid-template-columns:repeat(2,minmax(0,1fr));
+    gap:12px;
+  }
+  .cp-record-filters .cp-field:first-child{grid-column:1/-1;}
+  .cp-record-export{justify-self:start;}
+}
+@media (max-width:900px){
+  /* Sticky toolbar prevents iOS PWA page text from scrolling under the status bar. */
+  .cp-topbar{
+    position:sticky;
+    top:0;
+    z-index:45;
+    background:var(--surface);
+    box-sizing:border-box;
+    height:calc(56px + env(safe-area-inset-top));
+    min-height:calc(56px + env(safe-area-inset-top));
+    padding-top:env(safe-area-inset-top);
+    backdrop-filter:blur(10px);
+    -webkit-backdrop-filter:blur(10px);
+  }
+  .cp-topbar .cp-breadcrumb{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;}
+  .cp-topbar .cp-breadcrumb strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .cp-mobile-dock{
+    width:min(430px,calc(100% - 22px));
+    left:50%;
+    right:auto;
+    bottom:max(9px,env(safe-area-inset-bottom));
+    transform:translateX(-50%);
+    grid-template-columns:repeat(5,minmax(0,1fr));
+    min-height:74px;
+    padding:6px;
+    gap:3px;
+    box-sizing:border-box;
+    overflow:hidden;
+    border-radius:20px;
+  }
+  .cp-mobile-dock button{
+    min-width:0;
+    width:100%;
+    min-height:59px;
+    display:flex;
+    flex-direction:column;
+    gap:4px;
+    align-items:center;
+    justify-content:center;
+    padding:6px 3px;
+    box-sizing:border-box;
+    overflow:hidden;
+    border-radius:14px;
+  }
+  .cp-mobile-dock button svg{
+    display:block;
+    flex-shrink:0;
+    width:20px;
+    height:20px;
+  }
+  .cp-mobile-dock button>span{
+    display:block;
+    width:100%;
+    max-width:100%;
+    min-width:0;
+    font-size:9px;
+    font-weight:700;
+    line-height:1.08;
+    letter-spacing:-.01em;
+    text-align:center;
+    white-space:normal;
+    overflow-wrap:normal;
+    word-break:normal;
+    hyphens:none;
+  }
+  .cp-mobile-dock button.active{
+    transform:translateY(-3px);
+  }
+  /* Reserve actual space below content *and* footer for the fixed dock. */
+  .cp-main{
+    padding-bottom:calc(98px + env(safe-area-inset-bottom));
+  }
+  .cp-content{
+    padding-bottom:12px;
+  }
+  .cp-footer{
+    margin-top:12px;
+    padding:15px 0 14px;
+  }
+}
+@media (max-width:700px) {
+  .cp-record-filters {
+    grid-template-columns:minmax(0,1fr) !important;
+    gap:12px;
+    padding:15px;
+  }
+  .cp-record-filters .cp-field{
+    grid-column:1/-1 !important;
+    min-width:0;
+    width:100%;
+    margin:0;
+  }
+  .cp-record-filters .cp-field input,
+  .cp-record-filters .cp-field select{
+    width:100%;
+    min-width:0;
+    max-width:100%;
+    font-size:16px;
+    box-sizing:border-box;
+    border-radius:12px;
+    min-height:46px;
+  }
+  .cp-record-filters input[type=date]{
+    padding-inline:12px;
+    font-size:16px;
+  }
+  .cp-record-export{
+    grid-column:1/-1;
+    width:100%;
+    justify-content:center;
+    min-height:46px;
+    margin-top:2px;
+  }
+  .cp-record-summary{
+    grid-template-columns:repeat(2,minmax(0,1fr));
+    gap:9px;
+  }
+  .cp-record-summary>div{
+    min-width:0;
+    padding:13px;
+  }
+  .cp-record-summary span{line-height:1.4;}
+  .cp-deck-titlebar{padding:2px 0 4px;}
+  .cp-deck-titlebar h4{font-size:19px;}
+  .cp-deck-titlebar p{font-size:10px;}
+  .cp-deck-stage{overflow:clip;}
+  .cp-deck-card{inset:3px 10px 40px 10px;}
+  .cp-deck-layer-1{transform:translate3d(0,10px,0) scale(.972)!important;}
+  .cp-deck-layer-2{transform:translate3d(0,19px,0) scale(.944)!important;}
+  .cp-deck-bottom{padding:8px 1px 3px;}
+  .cp-deck-days{gap:4px;grid-template-columns:repeat(7,minmax(0,1fr));}
+  .cp-deck-days>button{min-width:0;padding-inline:1px;font-size:10px;}
+  .cp-faculty-class-actions{min-width:0;width:100%;gap:7px;justify-content:flex-start;}
+  .cp-faculty-class-actions>.cp-mini-btn{
+    min-width:0;
+    min-height:42px;
+    justify-content:center;
+  }
+  .cp-class-management-note{line-height:1.5;align-items:flex-start;}
+  .cp-letter-stack{min-width:0;}
+  .cp-letter-paper-head{gap:8px;padding:12px 10px;}
+  .cp-letter-paper-heading strong{font-size:12px;line-height:1.4;}
+  .cp-letter-paper-head .cp-pill{font-size:9px;max-width:88px;white-space:normal;text-align:center;}
+  .cp-letter-paper-icon{flex:0 0 auto;}
+  .cp-letter-preview{overflow-wrap:anywhere;}
+}
+@media(max-width:390px){
+  .cp-mobile-dock{width:calc(100% - 16px);padding:5px;gap:2px;min-height:73px;}
+  .cp-mobile-dock button{min-height:59px;padding:5px 2px;gap:3px;}
+  .cp-mobile-dock button>span{font-size:8.5px;line-height:1.08;}
+  .cp-mobile-dock button svg{width:19px;height:19px;}
+  .cp-deck-card{inset:3px 7px 40px 7px;}
+  .cp-deck-days>button{font-size:9px;}
+}
+/* In landscape the dock stays on the right; do not apply portrait dock geometry. */
+@media(max-width:920px) and (orientation:landscape) and (max-height:600px){
+  .cp-topbar{
+    height:calc(48px + env(safe-area-inset-top));
+    min-height:calc(48px + env(safe-area-inset-top));
+    padding-top:env(safe-area-inset-top);
+  }
+  .cp-mobile-dock{
+    display:grid!important;
+    left:auto!important;
+    right:max(8px,env(safe-area-inset-right))!important;
+    top:50%!important;
+    bottom:auto!important;
+    transform:translateY(-50%)!important;
+    width:60px!important;
+    min-height:0;
+    max-height:calc(100dvh - 24px);
+    grid-template-columns:minmax(0,1fr)!important;
+    grid-template-rows:repeat(5,minmax(0,1fr));
+    overflow:hidden;
+  }
+  .cp-mobile-dock button{min-height:39px;padding:4px;}
+  .cp-mobile-dock button>span{display:none!important;}
+  .cp-mobile-dock button.active{transform:translateX(-3px);}
+  .cp-main{padding-bottom:14px;}
+  .cp-content{padding-bottom:10px!important;}
+}
+/* Native browser safe-area and reduced-motion behaviors. */
+@media(prefers-reduced-motion:reduce){
+  .cp-mobile-dock button.active{transform:none!important;}
+}

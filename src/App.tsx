@@ -589,7 +589,7 @@ function WeekTimetable({
   const tall=Math.max(topClasses.length,previewClasses.length,farClasses.length);
   // Card stack includes a dedicated clearance area for the 2 visible undercards.
   // Keep every layer inside the stage so weekday controls below are never obscured.
-  const deckHeight=Math.min(680,Math.max(312,238+Math.min(5,tall)*84));
+  const deckHeight=Math.min(590,Math.max(252,188+Math.min(5,tall)*90));
   const reducedHint='Swipe for next day · swipe back for previous';
   const renderCard=(dayIndex:number,depth:0|1|2|3)=>{
     const day=days[dayIndex];
@@ -651,9 +651,9 @@ function WeekTimetable({
   }
   return <div className='cp-week-deck'>
     <div className='cp-deck-titlebar'>
-      <div><span className='cp-deck-eyebrow'>SCHEDULE</span>
-        <h4>{days[active].label}<small>{String(active+1).padStart(2,'0')} / 07</small></h4>
-        <p>{topClasses.length} class{topClasses.length===1?'':'es'} this day</p>
+      <div><span className='cp-deck-eyebrow'>WEEKLY TIMETABLE</span>
+        <h4>My class week</h4>
+        <p>Swipe the cards or choose a weekday below</p>
       </div>
     </div>
     <div className='cp-deck-stage' tabIndex={0} role='group'
@@ -2780,7 +2780,7 @@ export default function App() {
       <footer className='cp-footer'><span>CLASSPULSE · MSU MAIN CAMPUS</span>
         <small>Secure student and faculty access</small></footer>
     </div>
-    <nav className='cp-mobile-dock' aria-label='Quick navigation'>{pages[role].slice(0, 5).map(({ page: item, icon: Icon, label }) => <button type='button' aria-label={label} title={label} key={item} className={page === item ? 'active' : ''} onClick={() => navigate(item)}><Icon size={18}/><span>{label}</span></button>)}</nav>
+    <nav className='cp-mobile-dock' aria-label='Quick navigation'>{pages[role].slice(0, 5).map(({ page: item, icon: Icon, label }) => <button type='button' aria-label={label} title={label} key={item} className={page === item ? 'active' : ''} onClick={() => navigate(item)}><Icon size={18} aria-hidden='true'/><span>{label}</span></button>)}</nav>
 
     {modal && <div className='cp-modal-backdrop' onClick={() => { closeScanner(); }}><section className='cp-modal' onClick={(e) => e.stopPropagation()}><div className='cp-modal-head'><div><span>CLASSPULSE / ACTION</span><h2>{{
       join:'Join an enrolled section', 'create-section':'Create a class section', 'edit-section':'Edit approved class',
