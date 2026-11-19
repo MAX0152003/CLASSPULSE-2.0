@@ -614,10 +614,9 @@ function WeekTimetable({
         transform:flying==='left'
           ?'translate3d(-128%,-12px,45px) rotateY(-14deg) rotateZ(-12deg)'
           :flying==='right'
-            ?'translate3d(0,12px,-40px) scale(.935) rotateX(-4deg)'
+            ?'translate3d(0,0,0)'
             :dragX>0
-              ?'translate3d(0,'+(Math.abs(dragX)*.052)+'px,-'+Math.min(34,dragX*.18)+'px) scale('+
-                (1-Math.min(.07,dragX*.00035))+')'
+              ?'translate3d(0,0,0)'
               :'translate3d('+dragX+'px,'+(Math.min(17,Math.abs(dragX)*.07))+'px,'+
                 Math.min(35,Math.abs(dragX)*.13)+'px) rotateY('+(dragX/20)+
                 'deg) rotateZ('+(dragX/29)+'deg)',
@@ -665,6 +664,12 @@ function WeekTimetable({
         <p>{topClasses.length} class{topClasses.length===1?'':'es'} this day</p>
       </div>
     </div>
+    <div className='cp-deck-days cp-deck-days-top' role='group' aria-label='Jump to a class day'>
+      {days.map((day,index)=><button type='button' key={day.short} aria-pressed={active===index}
+        disabled={!!flying} className={active===index?'active':''} onClick={()=>jump(index)}>
+        <span>{day.short}</span>{getDaySections(index).length>0&&<i aria-hidden='true'/>}
+      </button>)}
+    </div>
     <div className='cp-deck-stage' tabIndex={0} role='group'
       aria-label={'Stacked class cards. Currently viewing '+days[active].label+
         '. Swipe left for the next day or right for the previous day. Use weekday tabs or keyboard arrows.'}
@@ -683,15 +688,6 @@ function WeekTimetable({
       {flying==='right'&&renderCard((active+6)%7,3)}
     </div>
     <div className='cp-deck-bottom'>
-      <div className='cp-deck-days' role='group' aria-label='Jump to a class day'>
-        {days.map((day,index)=>{
-          const hasClass=getDaySections(index).length>0;
-          return <button type='button' key={day.short} aria-pressed={active===index}
-            disabled={!!flying} className={active===index?'active':''} onClick={()=>jump(index)}>
-            <span>{day.short}</span>{hasClass&&<i aria-hidden='true'/>}
-          </button>;
-        })}
-      </div>
       <p><span className='cp-deck-hand'><ScanLine size={15}/></span>{reducedHint}</p>
     </div>
     <span className='cp-deck-announcement' aria-live='polite'>
