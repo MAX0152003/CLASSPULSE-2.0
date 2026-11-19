@@ -39,14 +39,6 @@ type Booking = { id: string; slotId: string; studentId: string; topic: string; s
 type Notice = { id: string; title: string; body: string; kind: string; createdAt: string; read: boolean };
 type AuthUser = { userId: string; email?: string; name?: string };
 type Dashboard = { profile: Profile; sections: Section[]; meetings: Meeting[]; attendance: Attendance[]; excuses: Excuse[]; bookings: Booking[]; notices: Notice[]; currentDate: string };
-type AdminInfo = { accounts: number; courseSections: number; qrSessions: number; aggregate: Record<string, number>; totalRecords: number };
-type AdminOperations = {
-  roleCounts: { Student: number; Faculty: number; Administrator: number };
-  pendingRoles: number; incompleteProfiles: number; sectionsWithoutRoom: number;
-  sectionsWithoutFaculty: number; enrolledStudents: number;
-  publishedAvailability: number; activeQrSessions: number;
-  classStatus: Record<string, number>; updatedAt: string;
-};
 type UserDirectory = { userId: string; name: string; email: string; role: string; roleRequest: string; photoVerified: boolean };
 type Outbox = QueuedScan;
 type PresenceStatus = 'AVAILABLE'|'IN CLASS'|'AWAY'|'NOT SET';
@@ -96,7 +88,6 @@ const pages: Record<Role, { page: NavPage; icon: LucideIcon; label: string }[]> 
   'System Administrator':[
     { page:'Overview',icon:LayoutDashboard,label:'Overview' },
     { page:'Administration',icon:ShieldCheck,label:'Administration' },
-    { page:'Classes',icon:CalendarDays,label:'Class Directory' },
     { page:'Profile',icon:Users,label:'My Profile' },
     { page:'Settings',icon:Settings,label:'Settings' },
   ],
@@ -1017,8 +1008,6 @@ export default function App() {
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [notices, setNotices] = useState<Notice[]>([]);
   const [users, setUsers] = useState<UserDirectory[]>([]);
-  const [summary, setSummary] = useState<AdminInfo | null>(null);
-  const [operations, setOperations] = useState<AdminOperations | null>(null);
   const [accountQuery, setAccountQuery] = useState('');
   const [importKind,setImportKind]=useState<ImportKind>('rooms');
   const [importRows,setImportRows]=useState<Record<string,string>[]>([]);
@@ -1058,6 +1047,22 @@ export default function App() {
   const [camera, setCamera] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [photoFile, setPhotoFile] = useState<File | null>(null);
+  const [photoZoom,setPhotoZoom]=useState(1);
+  const [photoPanX,setPhotoPanX]=useState(0);
+  const [photoPanY,setPhotoPanY]=useState(0);
+  const [photoReady,setPhotoReady]=useState(false);
+  const photoCropCanvas=useRef<HTMLCanvasElement|null>(null);
+  const menuSwipeRef=useRef<{x:number;y:number}|null>(null);
+  const [expandedNotice,setExpandedNotice]=useState<Notice|null>(null);
+  const [systemHealth,setSystemHealth]=useState<{
+    checkedAt:string;api:string;accounts:number;incompleteAccounts:number;
+    pendingReviewScans:number;delayedSyncReports:number;scanSampleSize:number;
+    openIssueCount:number;caveat:string;
+    openIssues:Array<{id:string;kind:string;message:string;severity:string;createdAt:string;status:string}>;
+  }|null>(null);
+  const [userInvites,setUserInvites]=useState<Array<{
+    id:string;email:string;role:string;status:string;createdAt:string;expiresAt:string;
+  }>>([]);
   const [profilePhotoUrl, setProfilePhotoUrl] = useState<string | null>(null);
   const [scanStatus, setScanStatus] = useState<'idle' | 'opening' | 'scanning' | 'submitting' | 'error' | 'success'>('idle');
   const [scanError, setScanError] = useState('');
@@ -1089,7 +1094,26 @@ export default function App() {
   const [queueBusy,setQueueBusy]=useState(false);
   const [queueProblem,setQueueProblem]=useState('');
   const showMessage = (s: string) => { setMessage(s); window.setTimeout(() => setMessage(''), 4800); };
-  const navigate = (p: NavPage) => { setPage(p); setDrawer(false); window.scrollTo({ top: 0, behavior: 'smooth' }); };
+  const navigate=(target:NavPage)=>{
+    const destination=isAdmin&&['Classes','Attendance','Student Records','Excuses','Consultations','Notifications'].includes(target)
+      ?'Administration':target;
+    setPage(destination as NavPage);setDrawer(false);
+    window.scrollTo({top:0,behavior:'smooth'});
+  };
+  // Edge-only left swipe opens the menu without stealing the weekly schedule gestures.
+  const navTouchStart=(ev:React.TouchEvent<HTMLDivElement>)=>{
+    if(window.innerWidth>920||modal){menuSwipeRef.current=null;return;}
+    const t=ev.touches[0];
+    menuSwipeRef.current=(drawer||t.clientX>=window.innerWidth-55)?{x:t.clientX,y:t.clientY}:null;
+  };
+  const navTouchEnd=(ev:React.TouchEvent<HTMLDivElement>)=>{
+    const start=menuSwipeRef.current;menuSwipeRef.current=null;
+    if(!start||window.innerWidth>920||modal)return;
+    const touch=ev.changedTouches[0],dx=touch.clientX-start.x,dy=touch.clientY-start.y;
+    if(Math.abs(dx)<64||Math.abs(dx)<Math.abs(dy)*1.5)return;
+    if(!drawer&&dx<0)setDrawer(true);
+    else if(drawer&&dx>0)setDrawer(false);
+  };
   const openScanner = () => {
     if (!isStudent) return;
     failedScanRef.current = { token: '', at: 0 };
@@ -1223,26 +1247,21 @@ export default function App() {
     setNotices(d.notices || []);
   }
   async function refreshAdministration() {
-    const [a,b,c,d,e] = await Promise.all([
-      api.get('/api/admin/users'), api.get('/api/admin/summary'),
-      api.get('/api/admin/audit'), api.get('/api/admin/operations'),
-      api.get('/api/sections'),
+    const [usersData,auditData,adminData,userData,healthData]=await Promise.all([
+      api.get('/api/admin/users'),api.get('/api/admin/audit'),
+      api.get('/api/admin/invites'),api.get('/api/admin/user-invites'),
+      api.get('/api/admin/system-health'),
     ]);
-    setUsers((a.data as { users: UserDirectory[] }).users || []);
-    setSummary(b.data as AdminInfo);
-    setAdminEvents((c.data as { events: typeof adminEvents }).events || []);
-    setOperations(d.data as AdminOperations);
-    setSections((e.data as { sections: Section[] }).sections || []);
-    const [roomResponse,inviteResponse]=await Promise.all([
-      api.get('/api/admin/rooms'),api.get('/api/admin/invites'),
-    ]);
-    setAdminRooms((roomResponse.data as {rooms:typeof adminRooms}).rooms||[]);
-    setAdminInvites((inviteResponse.data as {invites:typeof adminInvites}).invites||[]);
+    setUsers((usersData.data as {users:UserDirectory[]}).users||[]);
+    setAdminEvents((auditData.data as {events:typeof adminEvents}).events||[]);
+    setAdminInvites((adminData.data as {invites:typeof adminInvites}).invites||[]);
+    setUserInvites((userData.data as {invites:typeof userInvites}).invites||[]);
+    setSystemHealth(healthData.data as typeof systemHealth);
   }
   async function refreshPage(p: NavPage) {
     if (p === 'Overview') {
       if (role === 'System Administrator') {
-        await Promise.all([refreshDashboard(), refreshAdministration()]);
+        await refreshAdministration();
       } else {
         await Promise.all([refreshDashboard(), refreshLive(), ...(role === 'Faculty' ? [refreshMyPresence()] : [])]);
       }
@@ -1293,7 +1312,10 @@ export default function App() {
             setAuthError('This Google/Apple account uses a different email than the registration form. Sign out and verify the intended email.');
           }
           if(draft&&p.onboardingComplete)sessionStorage.removeItem(signupKey);
-          if(p.onboardingComplete&&!p.deletedAt)await refreshDashboard();
+          if(p.onboardingComplete&&!p.deletedAt){
+            if(p.role==='System Administrator')await refreshAdministration();
+            else await refreshDashboard();
+          }
         } catch (e) { if (mounted) setAuthError(apiMessage(e)); }
       }
       if (mounted) setInitialized(true);
@@ -1701,21 +1723,39 @@ export default function App() {
     await refreshPage('Excuses');
     showMessage('Your absence request was submitted to your assigned faculty.');
   }
+  useEffect(()=>{
+    if(!photoFile)return;
+    let cancelled=false;
+    setPhotoReady(false);
+    const url=URL.createObjectURL(photoFile);
+    const image=new Image();
+    image.onload=()=>{
+      if(cancelled||!photoCropCanvas.current)return;
+      const canvas=photoCropCanvas.current,ctx=canvas.getContext('2d');
+      if(!ctx)return;
+      const w=image.naturalWidth,h=image.naturalHeight,side=Math.min(w,h)/photoZoom;
+      if(!side||!Number.isFinite(side))return;
+      const sx=(w-side)/2*(1+photoPanX/100);
+      const sy=(h-side)/2*(1+photoPanY/100);
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      ctx.drawImage(image,sx,sy,side,side,0,0,canvas.width,canvas.height);
+      setPhotoReady(true);
+    };
+    image.onerror=()=>{if(!cancelled)setPhotoReady(false);};
+    image.src=url;
+    return ()=>{cancelled=true;URL.revokeObjectURL(url);};
+  },[photoFile,photoZoom,photoPanX,photoPanY]);
   async function uploadPhoto() {
-    if (!photoFile) return;
-    if (!['image/jpeg','image/png','image/webp'].includes(photoFile.type)) {
-      showMessage('Use a JPG, PNG or WebP image for your profile.'); return;
+    const canvas=photoCropCanvas.current;
+    if(!photoFile||!canvas||!photoReady)return;
+    const jpeg=canvas.toDataURL('image/jpeg',.87).split(',')[1];
+    if(!jpeg||jpeg.length>2_900_000){
+      showMessage('Could not prepare photo. Choose another picture.');return;
     }
-    if (photoFile.size > 2_000_000) {
-      showMessage('Choose a profile photo smaller than 2 MB.'); return;
-    }
-    await api.post('/api/profile/photo', {
-      contentType: photoFile.type, content: await fileBase64(photoFile),
-    });
-    setPhotoFile(null);
-    await bootstrap();
-    await loadProfilePhoto();
-    showMessage('Your new profile photo was saved. Faculty verification is separate.');
+    await api.post('/api/profile/photo',{contentType:'image/jpeg',content:jpeg});
+    setPhotoFile(null);setPhotoReady(false);
+    await bootstrap();await loadProfilePhoto();
+    showMessage('Profile picture updated. Faculty verification is separate.');
   }
 
   if (!initialized) return <div className='cp-loading'><Brand/><div className='cp-spinner'/><span>Preparing your campus workspace…</span></div>;
@@ -1896,17 +1936,6 @@ export default function App() {
       ['PRESENT','LATE','ABSENT'].includes(a.academicStatus));
     return {label:section.courseCode,value:subject.filter(a=>['PRESENT','LATE'].includes(a.academicStatus)).length,total:subject.length};
   });
-  const adminRoleBars=operations?[
-    {label:'Students',value:operations.roleCounts.Student,total:operations.roleCounts.Student+operations.roleCounts.Faculty+operations.roleCounts.Administrator},
-    {label:'Faculty',value:operations.roleCounts.Faculty,total:operations.roleCounts.Student+operations.roleCounts.Faculty+operations.roleCounts.Administrator},
-    {label:'Administrators',value:operations.roleCounts.Administrator,total:operations.roleCounts.Student+operations.roleCounts.Faculty+operations.roleCounts.Administrator},
-  ]:[];
-  const campusParts:MonitorPart[]=[
-    {label:'Present',value:summary?.aggregate?.PRESENT||0,color:'#219e75'},
-    {label:'Late',value:summary?.aggregate?.LATE||0,color:'#e6a14c'},
-    {label:'Absent',value:summary?.aggregate?.ABSENT||0,color:'#d76679'},
-    {label:'Excused',value:summary?.aggregate?.EXCUSED||0,color:'#8076cc'},
-  ];
   const graded = attendance.filter((a) => ['PRESENT','LATE','ABSENT'].includes(a.academicStatus));
   const onTime = graded.filter((a) => a.academicStatus === 'PRESENT').length;
   const lateCount = graded.filter((a) => a.academicStatus === 'LATE').length;
@@ -1920,13 +1949,21 @@ export default function App() {
     ['REJECTED','ABSENT','CANCELLED'].includes(status) ? 'red' : ['PENDING','PENDING REVIEW','LATE','DELAYED','PENDING_REVIEW'].includes(status) ? 'amber' : 'violet';
 
   const sidebar = <><div className='cp-sidebar-brand'><Brand light/></div>
-    <div className='cp-nav-section-title'>WORKSPACE / {role.toUpperCase()}</div><nav className='cp-side-links'>
-      {pages[role].map(({ page: item, icon: Icon, label }) => <button key={item} onClick={() => navigate(item)} className={page === item ? 'active' : ''}><Icon size={19}/><span>{label}</span>{page === item && <span className='cp-nav-active-indicator'/>}</button>)}
+    <div className='cp-nav-section-title'>MAIN MENU</div><nav className='cp-side-links'>
+      {pages[role].map(({page:item,icon:Icon,label})=><Fragment key={item}>
+        {(item==='Notifications'||item==='Profile')&&
+          <div className='cp-menu-separator' role='separator'
+            aria-label={item==='Profile'?'Account':'Updates'}/>}
+        <button onClick={()=>navigate(item)} className={page===item?'active':''}>
+          <Icon size={19}/><span>{label}</span>
+          {page===item&&<span className='cp-nav-active-indicator'/>}
+        </button>
+      </Fragment>)}
     </nav>
     <div className='cp-sidebar-bottom'><button title='Sign out' aria-label='Sign out'
       onClick={() => safeRun('sign-out', signOut)}><LogOut size={18}/><span>Sign out</span></button></div></>;
 
-  return <div className='cp-app'>
+  return <div className='cp-app' onTouchStart={navTouchStart} onTouchEnd={navTouchEnd}>
     <aside className='cp-sidebar'>{sidebar}</aside>
     {drawer && <div className='cp-drawer-overlay' onClick={() => setDrawer(false)}>
       <aside className='cp-drawer' role='navigation' aria-label='All ClassPulse pages'
@@ -1942,13 +1979,19 @@ export default function App() {
         <button className='cp-menu' aria-label='Open navigation'
           aria-expanded={drawer} onClick={() => setDrawer(true)}><Menu size={22}/></button>
         <div className='cp-breadcrumb cp-page-crumb'>
-          <strong>{page==='Overview'?'Dashboard':page}</strong>
+          <strong>{page==='Overview'
+            ?isAdmin?'Administrator':isFaculty?'Faculty':'Student'
+            :page}</strong>
         </div>
         <div className='cp-top-actions'>
         <span className={'cp-net ' + (online ? 'online' : 'offline')}>{online ? <Wifi size={14}/> : <CloudOff size={14}/>} {online ? 'Connected' : 'Offline'}</span>
         <button title='Toggle theme' className='cp-icon-button' onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}>{theme === 'light' ? <Moon size={19}/> : <Sun size={19}/>}</button>
         {!isAdmin && <button title='Notifications' className='cp-icon-button' onClick={() => navigate('Notifications')}><Bell size={19}/>{notices.some((n) => !n.read) && <i/>}</button>}
-        <button className='cp-profile-chip' onClick={() => navigate('Profile')} title='My profile'><span>{profileInitial}</span><div><strong>{profile?.name}</strong><small>{role}</small></div></button>
+        <button className='cp-profile-chip' onClick={()=>navigate('Profile')} title='My profile'>
+          <span>{profilePhotoUrl?<img className='cp-header-photo' src={profilePhotoUrl}
+            alt='My profile'/>:profileInitial}</span>
+          <div><strong>{profile?.name}</strong><small>{role}</small></div>
+        </button>
       </div></header>
       <main className='cp-content'>
         {page === 'Overview' && <>
@@ -1968,75 +2011,36 @@ export default function App() {
           </div>}
 
           {isAdmin ? <>
-            <div className='cp-admin-home-heading'>
-              <div><span><span className='cp-live-dot'/> CAMPUS CONTROL PLANE</span>
-                <h2>{greeting}, {firstName}.</h2><p>Approve roles, manage course sections, and monitor operational activity.</p></div>
-              <button className='cp-button dark' onClick={() => setModal('create-section')}><Plus size={16}/> New class section</button>
+            <section className='cp-system-hero cp-panel'>
+              <div><span className='cp-eyebrow light'>SYSTEM HEALTH CENTER</span>
+                <h2>ClassPulse operations</h2>
+                <p>Account access, connectivity, synchronization reports and application issues.</p></div>
+              <div className='cp-system-hero-status'><Activity size={23}/>
+                <strong>{systemHealth?.api==='responding'?'API responding':'Status not checked'}</strong>
+                <small>{systemHealth?.checkedAt?dateFmt(systemHealth.checkedAt):'No recent check'}</small>
+              </div>
+            </section>
+            <div className='cp-system-metrics'>
+              <button className='cp-system-metric' onClick={()=>navigate('Administration')}>
+                <Users size={22}/><strong>{systemHealth?.accounts??'—'}</strong><span>Active accounts</span></button>
+              <button className='cp-system-metric' onClick={()=>navigate('Administration')}>
+                <UserCheck size={22}/><strong>{systemHealth?.incompleteAccounts??'—'}</strong><span>Setup issues</span></button>
+              <button className='cp-system-metric' onClick={()=>navigate('Administration')}>
+                <CloudOff size={22}/><strong>{systemHealth?.delayedSyncReports??'—'}</strong><span>Delayed uploads · sample</span></button>
+              <button className='cp-system-metric' onClick={()=>navigate('Administration')}>
+                <Activity size={22}/><strong>{systemHealth?.openIssueCount??'—'}</strong><span>Reported problems</span></button>
             </div>
-            <div className='cp-admin-command-grid'>
-              <button className='cp-admin-command cp-approval-tile' onClick={() => {setAccountView('pending');navigate('Administration');}}>
-                <span><UserCheck size={21}/></span><strong>{operations?.pendingRoles ?? pendingRoleUsers.length}</strong><b>Pending role requests</b><small>Review faculty applications</small><ArrowUpRight size={18}/></button>
-              <button className='cp-admin-command' onClick={() => navigate('Classes')}>
-                <span><BookOpen size={21}/></span><strong>{operations?.sectionsWithoutRoom ?? 0}</strong><b>Sections needing rooms</b><small>Complete approved schedules</small><ArrowUpRight size={18}/></button>
-              <button className='cp-admin-command' onClick={() => navigate('Administration')}>
-                <span><Users size={21}/></span><strong>{operations?.incompleteProfiles ?? 0}</strong><b>Incomplete profiles</b><small>Account onboarding status</small><ArrowUpRight size={18}/></button>
-              <button className='cp-admin-command' onClick={() => navigate('Administration')}>
-                <span><QrCode size={21}/></span><strong>{operations?.activeQrSessions ?? 0}</strong><b>Active QR sessions</b><small>Campus-wide count only</small><ArrowUpRight size={18}/></button>
-            </div>
-            <div className='cp-two-column cp-monitoring-grid'>
-              <MonitoringDonut title='Campus attendance mix' eyebrow='AGGREGATE OUTCOMES'
-                parts={campusParts} subtitle='Institution-wide totals only; individual student records remain restricted.'/>
-              <MonitoringBars title='Account distribution' eyebrow='CAMPUS ROLES'
-                rows={adminRoleBars} subtitle='Current verified account roles.'/>
-            </div>
-            <div className='cp-two-column cp-admin-dashboard-grid'>
-              <section className='cp-panel'>
-                <SectionTitle eyebrow='PRIORITY INBOX' title='Account approvals'
-                  action={<button className='cp-link' onClick={() => {setAccountView('pending');navigate('Administration');}}>Manage all <ArrowUpRight size={14}/></button>}/>
-                {pendingRoleUsers.length ? pendingRoleUsers.slice(0,5).map(u=>
-                  <div className='cp-admin-queue-row' key={u.userId}>
-                    <span className='cp-user-avatar'>{u.name?.[0] || '?'}</span>
-                    <div><strong>{u.name}</strong><small>{u.email}</small></div>
-                    <Pill color='amber'>{u.roleRequest}</Pill>
-                    {u.roleRequest === 'Faculty' && <button className='cp-mini-btn'
-                      onClick={() => safeRun('approve',async()=>{await api.post('/api/admin/role',{userId:u.userId,role:'Faculty'});await refreshAdministration();showMessage('Faculty account approved.');})}>Approve</button>}
-                  </div>) : <Empty title='Approvals are clear' detail='New faculty access requests will appear here.' icon={CheckCircle2}/>}
-              </section>
-              <section className='cp-panel'>
-                <SectionTitle eyebrow='CURRENT CAMPUS RECORDS' title='Operational snapshot'/>
-                <div className='cp-admin-mini-metrics'>
-                  <div><span>Verified faculty</span><b>{operations?.roleCounts.Faculty ?? 0}</b></div>
-                  <div><span>Student accounts</span><b>{operations?.roleCounts.Student ?? 0}</b></div>
-                  <div><span>Approved sections</span><b>{summary?.courseSections ?? 0}</b></div>
-                  <div><span>Active enrollments</span><b>{operations?.enrolledStudents ?? 0}</b></div>
-                </div>
-                <div className='cp-admin-status-mix'>
-                  {Object.entries(operations?.classStatus || {}).map(([status,count])=><div key={status}>
-                    <span>{status}</span><div className='cp-admin-progress'><i style={{width:Math.round(count/Math.max(1,summary?.courseSections||0)*100)+'%'}}/></div><b>{count}</b></div>)}
-                </div>
-                <p className='cp-chart-note'>Counts are from approved records, not estimates or simulated analytics.</p>
-              </section>
-            </div>
-            <div className='cp-two-column cp-admin-dashboard-grid'>
-              <section className='cp-panel'>
-                <SectionTitle eyebrow='CLASS MANAGEMENT' title='Recently configured sections'
-                  action={<button className='cp-link' onClick={() => navigate('Classes')}>Open directory <ArrowUpRight size={14}/></button>}/>
-                {activeSections.slice(0,5).map(s=><div className='cp-class-row' key={s.id}>
-                  <span className='cp-class-icon'><BookOpen size={19}/></span>
-                  <div><strong>{s.courseCode} · {s.section}</strong><small>{s.facultyName} · {s.room||'Room unassigned'}</small></div>
-                  <button className='cp-mini-btn' onClick={() => {setForm(old=>({...old,sectionId:s.id,room:s.room,facultyId:s.facultyId,day:s.day,startTime:s.startTime,endTime:s.endTime}));setModal('edit-section');}}>Edit</button>
-                </div>)}
-                {!activeSections.length && <Empty title='No sections created' detail='Create your first course section to start academic operations.'/>}
-              </section>
-              <section className='cp-panel'>
-                <SectionTitle eyebrow='SECURITY AUDIT' title='Recent administrative actions'
-                  action={<button className='cp-link' onClick={() => navigate('Administration')}>Full audit <ArrowUpRight size={14}/></button>}/>
-                {adminEvents.slice(0,5).map(e=><div key={e.id} className='cp-update-row'>
-                  <span className='cp-update-dot'/><div><strong>{e.actionType.replace(/_/g,' ')}</strong><small>{dateFmt(e.timestamp)}</small></div>
-                </div>)}
-                {!adminEvents.length && <Empty title='No recent admin events' detail='Account approvals and class changes are audited.' icon={LockKeyhole}/>}
-              </section>
-            </div>
+            <section className='cp-panel cp-system-observability'>
+              <SectionTitle eyebrow='OBSERVABILITY' title='Reported system activity'/>
+              <p>{systemHealth?.caveat||'Only uploaded device activity can be examined.'}</p>
+              <div className='cp-system-status-pair'>
+                <span>Scans requiring review <strong>{systemHealth?.pendingReviewScans??'—'}</strong></span>
+                <span>Records sampled <strong>{systemHealth?.scanSampleSize??'—'}</strong></span>
+                <span>Faculty access requests <strong>{pendingRoleUsers.length}</strong></span>
+              </div>
+              <button className='cp-mini-btn' onClick={()=>safeRun('refresh-health',refreshAdministration)}>
+                <RefreshCcw size={15}/> Refresh system status</button>
+            </section>
           </>
           : isStudent ? <>
             <div className='cp-two-column cp-dashboard-top'>
@@ -2425,8 +2429,12 @@ export default function App() {
               <h3>{group.title}</h3>
               {group.items.map(n=><button type='button' key={n.id}
                 className={'cp-notification '+(n.read?'read':'')}
-                onClick={()=>safeRun('mark-read',async()=>{
-                  if(!n.read){await api.post('/api/notices/'+n.id+'/read',{});await refreshPage('Notifications');}
+                onClick={()=>safeRun('open-notification',async()=>{
+                  setExpandedNotice(n);setModal('notification-detail');
+                  if(!n.read){
+                    await api.post('/api/notices/'+n.id+'/read',{});
+                    await refreshPage('Notifications');
+                  }
                 })}>
                 <span className='cp-request-icon'>{n.kind==='attendance'?<ScanLine size={19}/>:
                   n.kind==='class'?<BookOpen size={19}/>:
@@ -2439,113 +2447,111 @@ export default function App() {
           </section>
         </>}
 
-        {page === 'Administration' && isAdmin && <>
-          <SectionTitle eyebrow='CAMPUS OPERATIONS' title='Administrator workspace'
-            subtitle='Role approvals, class reference management, audit activity and aggregate-only reporting.'
-            action={<button className='cp-button dark' onClick={() => setModal('create-section')}><Plus size={16}/> New section</button>}/>
+        {page==='Administration'&&isAdmin&&<>
+          <SectionTitle eyebrow='SYSTEM OPERATIONS' title='Account & issue management'
+            subtitle='Manage users and invitations, review technical reports, and inspect system access.'/>
+          <section className='cp-panel cp-admin-invites-panel'>
+            <div className='cp-admin-invites-head'>
+              <div><strong>User invitations</strong>
+                <small>Invite students and faculty using verified email addresses</small></div>
+              <button type='button' className='cp-mini-btn primary' onClick={()=>{
+                setForm(old=>({...old,inviteUserEmail:'',inviteUserRole:'Student'}));
+                setModal('invite-user');
+              }}><Plus size={16}/> Invite user</button>
+            </div>
+            {userInvites.filter(inv=>inv.status==='PENDING').map(inv=>
+              <div key={inv.id} className='cp-admin-invite-row'>
+                <span><strong>{inv.email}</strong><small>{inv.role} · Expires {dateFmt(inv.expiresAt)}</small></span>
+                <Pill color='amber'>Pending</Pill>
+                <button type='button' className='cp-mini-btn danger'
+                  onClick={()=>safeRun('revoke-user',async()=>{
+                    await api.post('/api/admin/user-invites/revoke',{email:inv.email});
+                    await refreshAdministration();showMessage('User invitation revoked.');
+                  })}>Revoke</button>
+              </div>)}
+            {!userInvites.some(inv=>inv.status==='PENDING')&&
+              <p className='cp-admin-invite-hint'>No pending user invitations.</p>}
+          </section>
           <section className='cp-panel cp-admin-invites-panel'>
             <div className='cp-admin-invites-head'>
               <div><strong>Administrator invitations</strong>
-                <small>Verified email required · Only existing administrators can invite</small></div>
+                <small>Existing administrators can authorize an additional verified account</small></div>
               <button type='button' className='cp-mini-btn primary' onClick={()=>{
                 update('inviteEmail','');setModal('invite-admin');
-              }}><Plus size={15}/> Invite admin</button>
+              }}><Plus size={16}/> Invite administrator</button>
             </div>
-            {adminInvites.filter(inv=>inv.status!=='REVOKED').length>0&&
-              <div className='cp-admin-invites-list'>
-                {adminInvites.filter(inv=>inv.status!=='REVOKED').map(inv=>
-                  <div key={inv.id} className='cp-admin-invite-row'>
-                    <span><strong>{inv.email}</strong>
-                      <small>{inv.status==='ACCEPTED'?'Active administrator':'Expires '+dateFmt(inv.expiresAt)}</small></span>
-                    <Pill color={inv.status==='ACCEPTED'?'green':'amber'}>{inv.status}</Pill>
-                    <button type='button' className='cp-mini-btn danger' onClick={()=>safeRun('revoke-admin',async()=>{
-                      if(!window.confirm('Revoke administrator access for '+inv.email+'?'))return;
-                      await api.post('/api/admin/invite/revoke',{email:inv.email});
-                      await refreshAdministration();showMessage('Administrator invitation revoked.');
-                    })}>Revoke</button>
-                  </div>)}
-              </div>}
-            <p className='cp-admin-invite-hint'>Invitees sign in using their exact email.
-              Share the ClassPulse link with them.</p>
+            {adminInvites.filter(inv=>inv.status!=='REVOKED').map(inv=>
+              <div key={inv.id} className='cp-admin-invite-row'>
+                <span><strong>{inv.email}</strong>
+                  <small>{inv.status==='ACCEPTED'?'Accepted':'Expires '+dateFmt(inv.expiresAt)}</small></span>
+                <Pill color={inv.status==='ACCEPTED'?'green':'amber'}>{inv.status}</Pill>
+                <button type='button' className='cp-mini-btn danger'
+                  onClick={()=>safeRun('revoke-admin',async()=>{
+                    if(!window.confirm('Revoke administrator access for '+inv.email+'?'))return;
+                    await api.post('/api/admin/invite/revoke',{email:inv.email});
+                    await refreshAdministration();showMessage('Administrator access revoked.');
+                  })}>Revoke</button>
+              </div>)}
+            <p className='cp-admin-invite-hint'>Invited administrators sign in using the exact approved email.</p>
           </section>
-          <section className='cp-panel cp-admin-import-banner'>
-            <div><strong>Academic data imports</strong><small>CSV validation · Audited changes</small></div>
-            <div className='cp-inline-actions'>
-              <button className='cp-mini-btn' onClick={()=>{
-                setImportKind('rooms');setImportRows([]);setImportReport(null);setModal('admin-import');
-              }}><Plus size={15}/> Import CSV</button>
-              <button className='cp-mini-btn' onClick={()=>setModal('admin-rooms')}>
-                <BookOpen size={15}/> Rooms ({adminRooms.length})</button>
+          <section className='cp-panel cp-admin-accounts'>
+            <SectionTitle eyebrow='ACCOUNTS' title='User directory'
+              subtitle='Review faculty requests. No academic section management.'/>
+            <div className='cp-admin-filter-bar'>
+              <label><Search size={16}/><input aria-label='Filter account directory'
+                value={accountQuery} onChange={ev=>setAccountQuery(ev.target.value)}
+                placeholder='Search by name or email'/></label>
+              <div className='cp-admin-filter-tabs'>
+                {([
+                  ['pending','Pending'],['all','All'],['Faculty','Faculty'],['Student','Students']
+                ] as const).map(([key,label])=><button key={key}
+                  className={accountView===key?'selected':''} onClick={()=>setAccountView(key)}>
+                  {label}</button>)}
+              </div>
+            </div>
+            <div className='cp-admin-users'>
+              {filteredUsers.slice(0,90).map(user=><div className='cp-admin-user' key={user.userId}>
+                <span className='cp-user-avatar'>{user.name?.[0]||'?'}</span>
+                <div><strong>{user.name}</strong><small>{user.email} · {user.role}</small></div>
+                {user.role==='Student'&&user.roleRequest==='Faculty'&&
+                  <button type='button' className='cp-mini-btn'
+                    onClick={()=>safeRun('approve-faculty',async()=>{
+                      await api.post('/api/admin/role',{userId:user.userId,role:'Faculty'});
+                      await refreshAdministration();showMessage('Faculty role approved.');
+                    })}>Approve Faculty</button>}
+              </div>)}
+              {!filteredUsers.length&&<Empty title='No matching accounts'
+                detail='Try a different filter or search.' icon={Users}/>}
             </div>
           </section>
-          <div className='cp-admin-summary-rail'>
-            <div><span>Accounts</span><strong>{summary?.accounts ?? '—'}</strong></div>
-            <div><span>Faculty requests</span><strong>{operations?.pendingRoles ?? '—'}</strong></div>
-            <div><span>Course sections</span><strong>{summary?.courseSections ?? '—'}</strong></div>
-            <div><span>Aggregate attendance</span><strong>{summary?.totalRecords ?? '—'}</strong></div>
-          </div>
-          <div className='cp-two-column cp-admin-management'>
-            <section className='cp-panel'>
-              <SectionTitle eyebrow='ACCOUNT DIRECTORY' title='Manage roles and requests'/>
-              <div className='cp-admin-filter-bar'>
-                <label><Search size={16}/><input aria-label='Filter users by name, email, or role'
-                  value={accountQuery} onChange={e=>setAccountQuery(e.target.value)} placeholder='Filter accounts'/></label>
-                <div className='cp-admin-filter-tabs'>
-                  {([
-                    ['pending','Pending'],['all','All'],['Faculty','Faculty'],['Student','Students']
-                  ] as const).map(([key,label])=><button key={key} onClick={()=>setAccountView(key)}
-                    className={accountView===key?'selected':''}>{label}</button>)}
-                </div>
-              </div>
-              <div className='cp-admin-users'>
-                {filteredUsers.slice(0,70).map(u=><div key={u.userId} className='cp-admin-user'>
-                  <span className='cp-user-avatar'>{u.name?.[0]||'?'}</span>
-                  <div><strong>{u.name}</strong><small>{u.email} · {u.role}</small>
-                    {u.roleRequest && <Pill color='amber'>Requested {u.roleRequest}</Pill>}
-                  </div>
-                  {u.role==='Student' && u.roleRequest==='Faculty' && <button className='cp-mini-btn'
-                    disabled={!!busy} onClick={()=>safeRun('approve',async()=>{
-                      await api.post('/api/admin/role',{userId:u.userId,role:'Faculty'});
-                      await refreshAdministration();showMessage('Faculty access approved.');
-                    })}>Approve</button>}
-                  {u.role==='Faculty' && <button className='cp-mini-btn'
-                    disabled={!!busy} onClick={()=>safeRun('revoke',async()=>{
-                      if(!window.confirm('Change this Faculty account back to Student?'))return;
-                      await api.post('/api/admin/role',{userId:u.userId,role:'Student'});
-                      await refreshAdministration();showMessage('Account role changed to Student.');
-                    })}>Set Student</button>}
-                </div>)}
-                {!filteredUsers.length && <Empty title='Nothing in this view' detail='Try All accounts or change your search.' icon={Users}/>}
-              </div>
-              {filteredUsers.length>70 && <p className='cp-chart-note'>Showing the first 70 matching accounts. Refine your search to narrow the list.</p>}
-            </section>
-            <section className='cp-admin-side-stack'>
-              <section className='cp-panel'>
-                <SectionTitle eyebrow='INSTITUTION REPORTS' title='Attendance totals'/>
-                {summary && <div className='cp-aggregate-list'>{Object.entries(summary.aggregate).map(([name,count])=><div key={name}><span>{name}</span><strong>{count}</strong></div>)}</div>}
-                <button className='cp-button dark' onClick={()=>summary && csvExport('classpulse-campus-summary.csv',
-                  Object.entries(summary.aggregate).map(([Status,Total])=>({Status,Total})))}>
-                  <Download size={16}/> Export campus summary</button>
-                <div className='cp-privacy-note'><ShieldCheck size={17}/> Only aggregate totals—no individual student attendance.</div>
-              </section>
-              <section className='cp-panel'>
-                <SectionTitle eyebrow='REFERENCE COMPLETENESS' title='Data quality checks'/>
-                <div className='cp-admin-mini-metrics'>
-                  <div><span>Profiles to complete</span><b>{operations?.incompleteProfiles ?? '—'}</b></div>
-                  <div><span>Sections without rooms</span><b>{operations?.sectionsWithoutRoom ?? '—'}</b></div>
-                  <div><span>Enrollment records</span><b>{operations?.enrolledStudents ?? '—'}</b></div>
-                  <div><span>Availability updates</span><b>{operations?.publishedAvailability ?? '—'}</b></div>
-                </div>
-                <button className='cp-mini-btn' onClick={()=>navigate('Classes')}>Maintain section records <ArrowUpRight size={14}/></button>
-              </section>
-            </section>
-          </div>
+          <section className='cp-panel cp-admin-issues'>
+            <SectionTitle eyebrow='SYSTEM DIAGNOSTICS' title='Reported technical problems'/>
+            <p className='cp-chart-note'>{systemHealth?.caveat||
+              'Devices that are offline cannot report status until they reconnect.'}</p>
+            {systemHealth?.openIssues.length?systemHealth.openIssues.map(issue=>
+              <article className='cp-system-issue' key={issue.id}>
+                <div><strong>{issue.kind.toUpperCase()} · {issue.severity}</strong>
+                  <time>{dateFmt(issue.createdAt)}</time></div>
+                <p>{issue.message}</p>
+                <button type='button' className='cp-mini-btn'
+                  onClick={()=>safeRun('resolve-issue',async()=>{
+                    await api.post('/api/admin/system-issues/'+issue.id+'/resolve',{});
+                    await refreshAdministration();showMessage('Issue marked resolved.');
+                  })}><Check size={15}/> Mark resolved</button>
+              </article>):
+              <Empty title='No open system reports'
+                detail='Reports appear here once users submit them.' icon={CheckCircle2}/>}
+          </section>
           <section className='cp-panel cp-admin-audit'>
-            <SectionTitle eyebrow='ACCOUNTABILITY' title='Administrative audit trail'
-              subtitle='Role approvals, reference changes and administrative access actions.'/>
-            {adminEvents.length ? adminEvents.slice(0,35).map(e=><div className='cp-admin-audit-row' key={e.id}>
-              <LockKeyhole size={15}/><span>{e.actionType.replace(/_/g,' ')}</span><time>{dateFmt(e.timestamp)}</time></div>) :
-              <Empty title='No administrative actions yet' detail='Access and changes are recorded here.'/>}
+            <SectionTitle eyebrow='SECURITY' title='Administrative audit trail'
+              subtitle='Recorded access, invitation and administrative account changes.'/>
+            {adminEvents.length?adminEvents.slice(0,35).map(event=>
+              <div className='cp-admin-audit-row' key={event.id}>
+                <LockKeyhole size={15}/>
+                <span>{event.actionType.replace(/_/g,' ')}</span>
+                <time>{dateFmt(event.timestamp)}</time>
+              </div>):<Empty title='No administrative events yet'
+                detail='Important administrator actions appear here.'/>}
           </section>
         </>}
 
@@ -2623,27 +2629,46 @@ export default function App() {
                   </div>
                 </div>
               </div>
-              <div className='cp-id-controls'>
-                <div role='group' aria-label='Digital ID card side' className='cp-id-switch'>
-                  <button type='button' aria-pressed={!idCardBack} className={!idCardBack?'active':''}
-                    onClick={()=>setIdCardBack(false)}>Card front</button>
-                  <button type='button' aria-pressed={idCardBack} className={idCardBack?'active':''}
-                    onClick={()=>setIdCardBack(true)}>Card details</button>
-                </div>
+              <div className='cp-id-controls cp-card-guide' role='note'>
+                <RefreshCcw size={15}/> Tap the campus card to flip · Tap again to return
               </div>
               <div className='cp-id-actions'>
                 <label className='cp-id-photo-change'><Plus size={16}/> Change profile photo
                   <input type='file' accept='image/jpeg,image/png,image/webp'
-                    onChange={e=>setPhotoFile(e.target.files?.[0]||null)}/></label>
+                    onChange={ev=>{
+                      const selected=ev.target.files?.[0]||null;
+                      if(selected&&(!['image/jpeg','image/png','image/webp'].includes(selected.type)||
+                        selected.size>15_000_000)){
+                        showMessage('Choose a JPG, PNG, or WebP photo under 15 MB.');
+                        ev.target.value='';return;
+                      }
+                      setPhotoReady(false);setPhotoFile(selected);
+                      setPhotoZoom(1);setPhotoPanX(0);setPhotoPanY(0);
+                      ev.target.value='';
+                    }}/></label>
                 <button type='button' className='cp-id-copy' disabled={!profile?.studentNumber}
                   onClick={()=>safeRun('copy-academic-id',async()=>{
                     await navigator.clipboard.writeText(profile?.studentNumber||'');
                     showMessage('Academic identifier copied.');
                   })}><FileText size={16}/> Copy campus ID</button>
               </div>
-              {photoFile&&<div className='cp-id-photo-pending' role='status'>
-                <span>{photoFile.name}</span><button className='cp-button dark' disabled={!!busy}
-                  onClick={()=>safeRun('photo',uploadPhoto)}>Save new photo <Check size={15}/></button>
+              {photoFile&&<div className='cp-photo-editor'>
+                <div className='cp-photo-editor-heading'><strong>Adjust your picture</strong>
+                  <span>Zoom and reposition before saving</span></div>
+                <canvas ref={photoCropCanvas} width={320} height={320} className='cp-photo-preview'
+                  role='img' aria-label='Square cropped profile picture preview'/>
+                <label>Zoom <input type='range' min='1' max='3' step='.05' value={photoZoom}
+                  onChange={ev=>setPhotoZoom(Number(ev.target.value))}/></label>
+                <label>Left / right <input type='range' min='-100' max='100' step='2'
+                  value={photoPanX} onChange={ev=>setPhotoPanX(Number(ev.target.value))}/></label>
+                <label>Up / down <input type='range' min='-100' max='100' step='2'
+                  value={photoPanY} onChange={ev=>setPhotoPanY(Number(ev.target.value))}/></label>
+                <div className='cp-photo-editor-actions'>
+                  <button type='button' className='cp-mini-btn'
+                    onClick={()=>{setPhotoFile(null);setPhotoReady(false);}}>Cancel</button>
+                  <button type='button' className='cp-button dark' disabled={!!busy||!photoReady}
+                    onClick={()=>safeRun('photo',uploadPhoto)}>Use this photo <Check size={15}/></button>
+                </div>
               </div>}
               <div className='cp-id-completion'>
                 <div><span>PROFILE READINESS</span><strong>{cardReadiness} of 5 details</strong></div>
@@ -2728,9 +2753,16 @@ export default function App() {
                     <strong>Export schedule <ArrowUpRight size={14}/></strong>
                   </button>}
                   {!isAdmin && <p className='cp-settings-helper'>Calendar export includes a 15-minute alert. For reliable Android system alarms, import the .ics into the separate native companion app. Web notifications depend on browser/device support.</p>}
-                  <button onClick={()=>safeRun('notify',async()=>{await notifications.subscribe();showMessage('Notification setup requested.');})}>
-                    <span><Bell size={18}/> Academic notifications</span><strong>Enable <ArrowUpRight size={14}/></strong>
-                  </button>
+                  {!isAdmin&&<button onClick={()=>safeRun('notify',async()=>{
+                    await notifications.subscribe();showMessage('Notification setup requested.');
+                  })}>
+                    <span><Bell size={18}/> Academic notifications</span>
+                    <strong>Enable <ArrowUpRight size={14}/></strong></button>}
+                  <button type='button' onClick={()=>{
+                    setForm(old=>({...old,issueKind:'other',issueMessage:''}));
+                    setModal('report-issue');
+                  }}><span><Activity size={18}/> Report a technical issue</span>
+                    <strong>Report <ArrowUpRight size={14}/></strong></button>
 
                   <button onClick={()=>safeRun('sign-out',signOut)}>
                     <span><LogOut size={18}/> Sign out</span><strong>Exit <ArrowUpRight size={14}/></strong>
@@ -2745,7 +2777,8 @@ export default function App() {
               </section>
         </>}
       </main>
-      <footer className='cp-footer'>CLASSPULSE / MSU MAIN CAMPUS <span>Designed for students and faculty. Protected by role-based access.</span></footer>
+      <footer className='cp-footer'><span>CLASSPULSE · MSU MAIN CAMPUS</span>
+        <small>Secure student and faculty access</small></footer>
     </div>
     <nav className='cp-mobile-dock' aria-label='Quick navigation'>{pages[role].slice(0, 5).map(({ page: item, icon: Icon, label }) => <button type='button' aria-label={label} title={label} key={item} className={page === item ? 'active' : ''} onClick={() => navigate(item)}><Icon size={18}/><span>{label}</span></button>)}</nav>
 
@@ -2753,13 +2786,69 @@ export default function App() {
       join:'Join an enrolled section', 'create-section':'Create a class section', 'edit-section':'Edit approved class',
       'faculty-create':'Add a subject', 'faculty-edit':'Customize subject', 'faculty-roster':'My student roster',
       'admin-import':'CSV Import', 'admin-rooms':'Campus Rooms',
-      'invite-admin':'Invite administrator', 'delete-account':'Delete account',
+      'invite-admin':'Invite administrator','invite-user':'Invite user',
+      'notification-detail':'Notification','report-issue':'Report technical issue',
+      'delete-account':'Delete account',
       status:'Publish class update',
       scan:'Scan attendance QR', qr:'Live class QR session', roster:'Class attendance roster', review:'Correct attendance',
       excuse:'Submit a digital excuse', 'excuse-decision':'Faculty excuse decision',
       slot:'Publish consultation dates', booking:'Request a consultation', 'booking-decision':'Confirm or reject booking',
     }[modal] || 'ClassPulse'}</h2></div><button className='cp-icon-button' onClick={closeScanner}><X size={18}/></button></div>
     <div className='cp-modal-body'>
+      {modal==='notification-detail'&&expandedNotice&&<section className='cp-notice-detail'>
+        <span className='cp-notice-date'>{dateFmt(expandedNotice.createdAt)}</span>
+        <h3>{expandedNotice.title}</h3>
+        <p>{expandedNotice.body}</p>
+        <button type='button' className='cp-button dark full' onClick={()=>{
+          const category=expandedNotice.kind;
+          setModal('');setExpandedNotice(null);
+          navigate(category==='consultation'?'Consultations':
+            category==='excuse'?'Excuses':category==='attendance'?'Attendance':
+            category==='class'?'Classes':'Notifications');
+        }}>Open related page <ArrowRight size={16}/></button>
+      </section>}
+      {modal==='invite-user'&&isAdmin&&<>
+        <label className='cp-field'><span>Verified email to invite</span>
+          <input type='email' autoComplete='email' value={form.inviteUserEmail||''}
+            onChange={ev=>update('inviteUserEmail',ev.target.value)}/></label>
+        <label className='cp-field'><span>Account role</span>
+          <select value={form.inviteUserRole||'Student'}
+            onChange={ev=>update('inviteUserRole',ev.target.value)}>
+            <option value='Student'>Student</option><option value='Faculty'>Faculty</option>
+          </select></label>
+        <p className='cp-modal-help'>This creates a seven-day invitation. Share the ClassPulse
+          sign-in link; the recipient must verify their own email. Passwords are not created by administrators.</p>
+        <button type='button' className='cp-button dark full' disabled={!!busy||
+          !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test((form.inviteUserEmail||'').trim())}
+          onClick={()=>safeRun('invite-user',async()=>{
+            await api.post('/api/admin/user-invites',{
+              email:(form.inviteUserEmail||'').trim(),role:form.inviteUserRole||'Student',
+            });
+            setModal('');await refreshAdministration();
+            showMessage('Invitation created. Share the ClassPulse sign-in link with this address.');
+          })}>Create invitation <ArrowRight size={16}/></button>
+      </>}
+      {modal==='report-issue'&&<>
+        <label className='cp-field'><span>Issue category</span>
+          <select value={form.issueKind||'other'}
+            onChange={ev=>update('issueKind',ev.target.value)}>
+            <option value='crash'>App crash</option><option value='network'>Connection</option>
+            <option value='sync'>Offline synchronization</option>
+            <option value='account'>Account access</option><option value='other'>Other issue</option>
+          </select></label>
+        <label className='cp-field'><span>What happened?</span>
+          <textarea rows={4} value={form.issueMessage||''}
+            onChange={ev=>update('issueMessage',ev.target.value)}
+            placeholder='Describe the problem. Do not enter passwords or private student data.'/></label>
+        <button className='cp-button dark full' type='button'
+          disabled={!!busy||(form.issueMessage||'').trim().length<8}
+          onClick={()=>safeRun('report-issue',async()=>{
+            await api.post('/api/system/issue',{
+              kind:form.issueKind||'other',message:form.issueMessage,severity:'MEDIUM'
+            });
+            setModal('');showMessage('System issue submitted to the administrator.');
+          })}>Send report <ArrowRight size={15}/></button>
+      </>}
       {modal==='invite-admin'&&isAdmin&&<>
         <label className='cp-field'><span>Administrator email</span>
           <input type='email' inputMode='email' autoComplete='email'

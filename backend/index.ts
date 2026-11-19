@@ -80,10 +80,14 @@ type Booking = { id: string; slotId: string; studentId: string; topic: string; s
 type AttendanceCorrection = { id:string; sectionId:string; attendanceId:string; sessionId:string; studentId:string;
   facultyId:string; previousStatus:string; nextStatus:string; reason:string; timestamp:string };
 
-const ADMIN_EMAILS = [...new Set([
-  ...(process.env.CLASSPULSE_ADMIN_EMAILS || '').split(','),
-].map((s) => s.trim().toLowerCase()).filter(Boolean))];
+const ADMIN_EMAILS = [...new Set(
+  (process.env.CLASSPULSE_ADMIN_EMAILS || '').split(',')
+    .map(s=>s.trim().toLowerCase()).filter(Boolean)
+)];
 type AdminInvite={id:string;email:string;status:'PENDING'|'ACCEPTED'|'REVOKED';createdBy:string;createdAt:string;expiresAt:string;acceptedAt?:string;previousRole?:Role};
+type UserInvite={id:string;email:string;role:'Student'|'Faculty';status:'PENDING'|'ACCEPTED'|'REVOKED';createdBy:string;createdAt:string;expiresAt:string;acceptedAt?:string};
+type SystemIssue={id:string;kind:'crash'|'network'|'sync'|'account'|'other';severity:'LOW'|'MEDIUM'|'HIGH';message:string;reporterId:string;createdAt:string;status:'OPEN'|'RESOLVED';resolvedAt?:string};
+const userInviteId=(email:string)=>'ui-'+createHash('sha256').update(email.trim().toLowerCase()).digest('hex').slice(0,42);
 function adminInviteId(email:string){return 'ai-'+createHash('sha256').update(email.toLowerCase()).digest('hex').slice(0,42);}
 async function isAdminEmail(email?:string) {
   if(!email)return false;
@@ -440,6 +444,12 @@ export const handler = router({
       return error('Choose Student or Faculty. Administrator accounts require an invitation.',400);
     }
     if (p.onboardingComplete) return error('The account is already registered. Use Profile to edit your information.', 409);
+    const invite=await get<UserInvite>('cp_user_invites',userInviteId(p.email));
+    if(invite&&invite.email===p.email.toLowerCase()&&invite.status==='PENDING'&&
+       Date.parse(invite.expiresAt)>Date.now()){
+      if(requestedRole!==invite.role)return error('Your invitation specifies '+invite.role,403);
+      await patch('cp_user_invites',invite.id,{status:'ACCEPTED',acceptedAt:nowIso()});
+    }
     const role: Role = p.role === 'System Administrator' ? 'System Administrator'
       : requestedRole === 'Faculty' ? 'Faculty' : 'Student';
     const roleRequest = '';
@@ -558,6 +568,41 @@ export const handler = router({
     await audit(ctx.user!.userId,'REVOKE_ADMIN_INVITE','Profile',id,'system');
     return json({ok:true});
   }],
+  'GET /api/admin/user-invites': [requireAuth(),adminGuard,async()=>{
+    const invites=await list<UserInvite>('cp_user_invites',160);
+    return json({invites:invites.sort((a,b)=>b.createdAt.localeCompare(a.createdAt))});
+  }],
+  'POST /api/admin/user-invites': [requireAuth(),adminGuard,async(ctx)=>{
+    const body=input(ctx.body);
+    const email=text(body.email,180).toLowerCase();
+    const role=text(body.role,28);
+    if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email))return error('Enter a valid email',400);
+    if(role!=='Student'&&role!=='Faculty')return error('Invite a Student or Faculty',400);
+    const id=userInviteId(email),existing=await get<UserInvite>('cp_user_invites',id);
+    if(existing?.status==='ACCEPTED')return error('Account already accepted invitation',409);
+    const invite:UserInvite={id,email,role,status:'PENDING',createdBy:ctx.user!.userId,
+      createdAt:nowIso(),expiresAt:new Date(Date.now()+7*86400000).toISOString()};
+    const ok=existing?await patch('cp_user_invites',id,invite):await add('cp_user_invites',invite);
+    if(!ok)return error('Could not save invitation',409);
+    await audit(ctx.user!.userId,'INVITE_USER','Profile',id,'system');
+    return json({ok:true,invite:{email,role,expiresAt:invite.expiresAt},
+      note:'Send the sign-in link; the identity provider verifies the invited email.'});
+  }],
+  'POST /api/admin/user-invites/revoke': [requireAuth(),adminGuard,async(ctx)=>{
+    const email=text(input(ctx.body).email,180).toLowerCase();
+    const invite=await get<UserInvite>('cp_user_invites',userInviteId(email));
+    if(!invite||invite.email!==email)return error('Invitation not found',404);
+    if(invite.status==='ACCEPTED')return error('Registered account must be managed separately',409);
+    if(!await patch('cp_user_invites',invite.id,{status:'REVOKED'}))return error('Refresh and retry',409);
+    await audit(ctx.user!.userId,'REVOKE_USER_INVITE','Profile',invite.id,'system');
+    return json({ok:true});
+  }],
+  'GET /api/account/invite': [requireAuth(),async(ctx)=>{
+    const email=ctx.user?.email?.trim().toLowerCase()||'';
+    const invite=await get<UserInvite>('cp_user_invites',userInviteId(email));
+    return json({invite:invite&&invite.email===email&&invite.status==='PENDING'&&
+      Date.parse(invite.expiresAt)>Date.now()?{role:invite.role}:null});
+  }],
   'GET /api/admin/users': [requireAuth(), adminGuard, async (ctx) => {
     const profiles = (await list<Profile>('cp_profiles')).filter(p=>!p.deletedAt);
     await audit(ctx.user!.userId, 'VIEW_ROLE_DIRECTORY', 'ProfileDirectory', 'all', 'system');
@@ -570,9 +615,10 @@ export const handler = router({
     const body = input(ctx.body);
     const userId = text(body.userId, 90);
     const role = text(body.role, 36);
-    if (!['Student', 'Faculty'].includes(role) || !userId) return error('Choose a valid user and role', 400);
+    if(role!=='Faculty'||!userId)return error('Only Faculty approvals are supported',400);
     const target = await get<Profile>('cp_profiles', userId);
-    if (!target || ADMIN_EMAILS.includes(target.email.toLowerCase())) return error('The account cannot be reassigned', 403);
+    if(!target||target.deletedAt||await isAdminEmail(target.email))
+      return error('The account cannot be reassigned',403);
     await patch('cp_profiles', userId, { role, roleRequest: '' });
     await audit(ctx.user!.userId, 'APPROVE_ROLE', 'Profile', userId, 'system');
     await notify(userId, 'Account role updated', 'Your role is now ' + role + '.', 'role');
@@ -727,34 +773,6 @@ export const handler = router({
       corrections:allCorrections.filter(c=>c.sectionId===s.id).sort((x,y)=>y.timestamp.localeCompare(x.timestamp)).slice(0,100)});
   }],
 
-  'POST /api/admin/section': [requireAuth(), adminGuard, async (ctx) => {
-    const body = input(ctx.body);
-    const facultyId = text(body.facultyId, 90);
-    const faculty = await get<Profile>('cp_profiles', facultyId);
-    if (!faculty || faculty.role !== 'Faculty') return error('Select a registered Faculty account', 400);
-    const courseCode = text(body.courseCode, 24).toUpperCase();
-    const title = text(body.title, 120);
-    const section = text(body.section, 40);
-    const day = text(body.day, 16);
-    const startTime = text(body.startTime, 5);
-    const endTime = text(body.endTime, 5);
-    const room = text(body.room, 60);
-    if (!courseCode || !title || !section || !validClassDay(day)
-      || !timeValid(startTime) || !timeValid(endTime) || startTime >= endTime) return error('Fill out a valid class schedule', 400);
-    const term = text(body.term, 32) || 'Current term';
-    const facultyClash = await ownTeachingConflict(facultyId,day,startTime,endTime);
-    if (facultyClash) return error('Assigned faculty has an overlapping '+facultyClash.courseCode+' class',409);
-    const roomClash = await roomConflict(room,day,startTime,endTime,term);
-    if (roomClash) return error('Room is booked by '+roomClash.courseCode+' on '+roomClash.day,409);
-    const s: Section = {
-      id: randomUUID(), courseCode, title, section, term, day,
-      startTime, endTime, room, facultyId, facultyName: faculty.name, status: 'ATTENDING',
-      joinCode: randomBytes(4).toString('hex').toUpperCase(),
-    };
-    await add('cp_sections', s);
-    await audit(ctx.user!.userId, 'CREATE_SECTION', 'CourseSection', s.id, 'system');
-    return json({ ok: true, section: s });
-  }],
   'GET /api/sections/:id/details': [requireAuth(), async (ctx) => {
     const p=await me(ctx.user!);
     const section=await get<Section>('cp_sections',ctx.params.id);
@@ -810,6 +828,7 @@ export const handler = router({
   }],
   'GET /api/sections': [requireAuth(), async (ctx) => {
     const p = await me(ctx.user!);
+    if(p.role==='System Administrator')return forbid('Administrators do not manage academic sections');
     const sections = await availableSections(p);
     const joined = p.role === 'Student' ? await mySectionIds(p.userId) : [];
     return json({
@@ -835,6 +854,7 @@ export const handler = router({
   }],
   'GET /api/dashboard': [requireAuth(), async (ctx) => {
     const p = await me(ctx.user!);
+    if(p.role==='System Administrator')return forbid('Use the system-health dashboard');
     const sections = await availableSections(p);
     const allMeetings = p.role === 'System Administrator' ? [] : await list<Meeting>('cp_sessions');
     const meetings = allMeetings.filter((m) => sections.some((s) => s.id === m.sectionId));
@@ -1424,152 +1444,53 @@ export const handler = router({
   }],
 
 
-  'GET /api/admin/rooms': [requireAuth(), adminGuard, async () => {
-    return json({rooms:await list<{id:string;code:string;building:string;capacity:number;status:string}>('cp_rooms',200)});
+  'POST /api/system/issue': [requireAuth(),async(ctx)=>{
+    const p=await me(ctx.user!),body=input(ctx.body);
+    const kind=text(body.kind,24).toLowerCase();
+    const severity=text(body.severity,12).toUpperCase();
+    const message=text(body.message,420)
+      .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi,'[email removed]')
+      .replace(/\b\+?\d[\d ()-]{8,}\d\b/g,'[number removed]');
+    if(!['crash','network','sync','account','other'].includes(kind)||message.length<8)
+      return error('Choose a category and describe the issue in at least eight characters',400);
+    const recent=(await list<SystemIssue>('cp_system_issues',120)).filter(item=>
+      item.reporterId===p.userId&&Date.now()-Date.parse(item.createdAt)<60000);
+    if(recent.length>2)return error('Please wait before submitting another issue',429);
+    const issue:SystemIssue={id:randomUUID(),kind:kind as SystemIssue['kind'],
+      severity:['LOW','MEDIUM','HIGH'].includes(severity)?severity as SystemIssue['severity']:'MEDIUM',
+      message,createdAt:nowIso(),reporterId:p.userId,status:'OPEN'};
+    if(!await add('cp_system_issues',issue))return error('Unable to store report',500);
+    await audit(p.userId,'REPORT_SYSTEM_ISSUE','SystemIssue',issue.id,'system');
+    return json({ok:true,issueId:issue.id});
   }],
-  'POST /api/admin/rooms/:id/status': [requireAuth(), adminGuard, async ctx => {
-    const room=await get<{code:string;status:string}>('cp_rooms',ctx.params.id);
-    if(!room)return error('Room not found',404);
-    const status=text(input(ctx.body).status,24).toUpperCase();
-    if(!['AVAILABLE','MAINTENANCE','INACTIVE'].includes(status))return error('Invalid room status',400);
-    if(status!=='AVAILABLE'){
-      const used=(await list<Section>('cp_sections',240)).some(s=>!s.archivedAt&&s.room.toUpperCase()===room.code.toUpperCase());
-      if(used)return error('Room is used by active classes; reassign those classes before marking it unavailable',409);
-    }
-    await patch('cp_rooms',ctx.params.id,{status});
-    await audit(ctx.user!.userId,'UPDATE_CAMPUS_ROOM','Room',ctx.params.id,'system');
-    return json({ok:true});
-  }],
-  'POST /api/admin/import/preview': [requireAuth(), adminGuard, async ctx => {
-    const body=input(ctx.body), kind=text(body.kind,20);
-    if(!['rooms','sections','enrollments'].includes(kind))return error('Invalid import kind',400);
-    const rows=body.rows;
-    if(!Array.isArray(rows)||rows.length<1||rows.length>15)return error('Import 1–15 rows per batch',400);
-    const result=await validateImport(kind,rows);
-    const fingerprint=createHash('sha256').update(JSON.stringify({kind,rows})).digest('hex');
-    return json({kind,total:rows.length,valid:result.valid.length,issues:result.issues,
-      fingerprint,example:result.valid.slice(0,4).map(x=>x.preview)});
-  }],
-  'POST /api/admin/import/commit': [requireAuth(), adminGuard, async ctx => {
-    const body=input(ctx.body),kind=text(body.kind,20);
-    const rows=body.rows;
-    const requestId=text(body.requestId,90);
-    const fingerprint=text(body.fingerprint,64);
-    if(!['rooms','sections','enrollments'].includes(kind)
-      ||!Array.isArray(rows)||rows.length<1||rows.length>15
-      ||!/^[-a-f0-9]{36}$/.test(requestId))return error('Invalid import request',400);
-    const actual=createHash('sha256').update(JSON.stringify({kind,rows})).digest('hex');
-    if(fingerprint!==actual)return error('Rows changed after preview; preview the latest file again',409);
-    const id='bulk-'+createHash('sha256').update(ctx.user!.userId+':'+requestId).digest('hex').slice(0,40);
-    const old=await get<{fingerprint:string;count:number}>('cp_bulk_receipts',id);
-    if(old)return old.fingerprint===fingerprint?json({ok:true,replayed:true,imported:old.count})
-      :error('Import request ID already used for another file',409);
-    const result=await validateImport(kind,rows);
-    if(result.issues.length)return error('Import validation changed; preview again',409);
-    const table=kind==='rooms'?'cp_rooms':kind==='sections'?'cp_sections':'cp_enrollments';
-    try{
-      await db.transact([
-        db.tx.add(table,result.valid.map(x=>x.record)),
-        db.tx.add('cp_bulk_receipts',[{id,fingerprint,count:result.valid.length,kind,
-          createdAt:nowIso(),adminId:ctx.user!.userId}]),
-      ]);
-    }catch{return error('Import could not complete. Check for duplicates and retry with a new preview.',409);}
-    await audit(ctx.user!.userId,'BULK_IMPORT_'+kind.toUpperCase(),'InstitutionalImport',id,'system');
-    return json({ok:true,imported:result.valid.length});
-  }],
-
-  'GET /api/admin/operations': [requireAuth(), adminGuard, async () => {
-    const [accounts, sections, enrollments, availability, sessions] = await Promise.all([
-      list<Profile>('cp_profiles'),
-      list<Section>('cp_sections'),
-      list<{ studentId: string; sectionId: string }>('cp_enrollments'),
-      list<{ status: string }>('cp_availability'),
-      list<Meeting>('cp_sessions'),
+  'GET /api/admin/system-health': [requireAuth(),adminGuard,async()=>{
+    const [issues,records,accounts]=await Promise.all([
+      list<SystemIssue>('cp_system_issues',150),
+      list<Attendance>('cp_attendance',250),
+      list<Profile>('cp_profiles',250),
     ]);
-    const roleCounts = {
-      Student: accounts.filter(p=>!p.deletedAt&&p.role==='Student').length,
-      Faculty: accounts.filter(p=>!p.deletedAt&&p.role==='Faculty').length,
-      Administrator: accounts.filter(p=>!p.deletedAt&&p.role==='System Administrator').length,
-    };
-    const classStatus: Record<string, number> = {};
-    for (const section of sections) {
-      const status = section.status || 'ATTENDING';
-      classStatus[status] = (classStatus[status] || 0) + 1;
-    }
-    const now = Date.now();
-    const activeQrSessions = sessions.filter((m) => m.status === 'OPEN'
-      && new Date(m.endAt).getTime() > now && new Date(m.startAt).getTime() < now);
-    return json({
-      roleCounts,
-      pendingRoles: accounts.filter((p) => !!p.roleRequest).length,
-      incompleteProfiles: accounts.filter((p) => !p.onboardingComplete).length,
-      sectionsWithoutRoom: sections.filter((s) => !s.room || /TBA|UNASSIGNED/i.test(s.room)).length,
-      sectionsWithoutFaculty: sections.filter((s) => !s.facultyId).length,
-      enrolledStudents: enrollments.length,
-      publishedAvailability: availability.length,
-      activeQrSessions: activeQrSessions.length,
-      classStatus,
-      updatedAt: nowIso(),
-    });
+    const open=issues.filter(i=>i.status==='OPEN');
+    const delayed=records.filter(a=>Number.isFinite(Date.parse(a.receivedAt))&&
+      Number.isFinite(Date.parse(a.capturedAt))&&
+      Date.parse(a.receivedAt)-Date.parse(a.capturedAt)>900000);
+    return json({checkedAt:nowIso(),api:'responding',
+      accounts:accounts.filter(p=>!p.deletedAt).length,
+      incompleteAccounts:accounts.filter(p=>!p.deletedAt&&!p.onboardingComplete).length,
+      pendingReviewScans:records.filter(a=>a.verificationStatus==='PENDING_REVIEW').length,
+      delayedSyncReports:delayed.length,scanSampleSize:records.length,
+      openIssueCount:open.length,
+      openIssues:open.sort((a,b)=>b.createdAt.localeCompare(a.createdAt)).slice(0,35)
+        .map(({reporterId,...rest})=>rest),
+      caveat:'Only stored samples are visible. Devices that have not synchronized cannot be monitored live.'});
   }],
-  'POST /api/admin/section/:id/update': [requireAuth(), adminGuard, async (ctx) => {
-    const current = await get<Section>('cp_sections', ctx.params.id);
-    if (!current) return error('Class section not found', 404);
-    const body = input(ctx.body);
-    const day = text(body.day, 18);
-    const startTime = text(body.startTime, 5);
-    const endTime = text(body.endTime, 5);
-    const room = text(body.room, 60);
-    const facultyId = text(body.facultyId, 90);
-    if (!validClassDay(day)
-      || !timeValid(startTime) || !timeValid(endTime)
-      || startTime >= endTime || !room || !facultyId) {
-      return error('Enter a valid classroom, day, start time, end time, and faculty account', 400);
-    }
-    const faculty = await get<Profile>('cp_profiles', facultyId);
-    if (!faculty || faculty.role !== 'Faculty') {
-      return error('Assigned faculty must have an approved Faculty role', 400);
-    }
-    // Preserve session integrity; faculty or schedule cannot be changed during an active QR meeting.
-    const active = (await list<Meeting>('cp_sessions')).some((m) =>
-      m.sectionId === current.id && m.status === 'OPEN' && Date.parse(m.endAt) > Date.now());
-    if (active) return error('Close the active QR session before editing this class schedule', 409);
-    const facultyClash = await ownTeachingConflict(facultyId,day,startTime,endTime,current.id);
-    if (facultyClash) return error('Assigned faculty has an overlapping '+facultyClash.courseCode+' class',409);
-    const roomClash = await roomConflict(room,day,startTime,endTime,current.term,current.id);
-    if (roomClash) return error('Room is booked by '+roomClash.courseCode+' on '+roomClash.day,409);
-    await patch('cp_sections', current.id, { day, startTime, endTime, room, facultyId, facultyName: faculty.name });
-    await audit(ctx.user!.userId, 'UPDATE_CLASS_REFERENCE', 'CourseSection', current.id, 'system');
-    for (const member of await sectionMembers(current.id)) {
-      await notify(member.studentId, current.courseCode + ' schedule updated',
-        day + ' ' + startTime + '–' + endTime + ' · ' + room, 'class');
-    }
-    return json({ ok: true });
-  }],
-  'POST /api/admin/section/:id/rotate-code': [requireAuth(), adminGuard, async (ctx) => {
-    const section = await get<Section>('cp_sections', ctx.params.id);
-    if (!section) return error('Class section not found', 404);
-    const joinCode = randomBytes(5).toString('hex').toUpperCase();
-    await patch('cp_sections', section.id, { joinCode });
-    await audit(ctx.user!.userId, 'ROTATE_JOIN_CODE', 'CourseSection', section.id, 'system');
-    return json({ ok: true, joinCode, message: 'Previous code is no longer valid for new enrollments.' });
-  }],
-
-  'GET /api/admin/summary': [requireAuth(), adminGuard, async (ctx) => {
-    const sections = await list<Section>('cp_sections');
-    const sessions = await list<Meeting>('cp_sessions');
-    const attendance = await list<Attendance>('cp_attendance');
-    const accounts = await list<Profile>('cp_profiles');
-    const counts = { PRESENT: 0, LATE: 0, ABSENT: 0, EXCUSED: 0 };
-    for (const a of attendance) {
-      if (a.academicStatus in counts) counts[a.academicStatus as keyof typeof counts]++;
-    }
-    await audit(ctx.user!.userId, 'VIEW_AGGREGATE_REPORT', 'Summary', 'campus', 'system');
-    return json({
-      accounts: accounts.length, courseSections: sections.length, qrSessions: sessions.length,
-      aggregate: counts, totalRecords: attendance.length,
-      note: 'Aggregate only. No student-level attendance is exposed to Administrator.',
-    });
+  'POST /api/admin/system-issues/:id/resolve': [requireAuth(),adminGuard,async(ctx)=>{
+    const issue=await get<SystemIssue>('cp_system_issues',ctx.params.id);
+    if(!issue)return error('Issue not found',404);
+    if(issue.status==='RESOLVED')return json({ok:true});
+    if(!await patch('cp_system_issues',issue.id,{status:'RESOLVED',resolvedAt:nowIso()}))
+      return error('Refresh and retry',409);
+    await audit(ctx.user!.userId,'RESOLVE_ISSUE','SystemIssue',issue.id,'system');
+    return json({ok:true});
   }],
   'GET /api/admin/audit': [requireAuth(), adminGuard, async () => {
     const events = await list<{ actionType: string; targetType: string; scope: string; timestamp: string }>('cp_audit', 100);

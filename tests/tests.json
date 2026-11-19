@@ -25,7 +25,14 @@
       "Admin-only verified-email invitation controls with revoke support",
       "Dark and light theme toggles and provider-compatible styling",
       "Responsive mobile landscape navigation drawer with accessible all-page menu",
-      "Revoking invited administrator access restores previous academic role without affecting first administrator"
+      "Revoking invited administrator access restores previous academic role without affecting first administrator",
+      "Administrator access cannot create or modify courses, sections or academic imports",
+      "Administrator can invite Students, Faculty, and verified-email administrators",
+      "Administrator can review system health and resolve submitted technical incidents",
+      "Mobile landscape left-swipe menu, one-column scrollable navigation, right-side 3D dock",
+      "Photo crop zoom controls save the same square image used by ID and header",
+      "Campus ID tap flipping without redundant front/detail buttons",
+      "Openable notification detail, dark excuse letters, normal-flow footer"
     ],
     "description": "Ensure Create Account is a distinct usable registration workflow rather than an immediate sign-in redirect.",
     "steps": [
@@ -45,7 +52,14 @@
       "In Administrator view invite a verified email, verify invite state, then revoke it; non-admin must not be able to open or invoke this workflow.",
       "Open Delete Account: action is disabled until DELETE is entered. After confirmation sign out; deleted account cannot reopen campus records. Admin sees a protection message.",
       "On iPhone/Android landscape 812×375, open menu. Confirm two-column scrollable navigation reveals all destinations including Settings and Sign out; the dock does not obscure content.",
-      "Invite an existing Faculty account, sign in as the invited administrator, revoke that invitation as primary administrator, verify admin access is immediately denied and Faculty role is restored."
+      "Invite an existing Faculty account, sign in as the invited administrator, revoke that invitation as primary administrator, verify admin access is immediately denied and Faculty role is restored.",
+      "On student/faculty mobile portrait, swipe LEFT from the right edge to open the menu; swipe RIGHT to close. Verify weekly schedule swipes do not open it.",
+      "In landscape 812x375 and 920x430, ensure nav dock is on RIGHT; drawer has one scrollable vertical column without visible scrollbar; all destinations accessible and content not zoomed.",
+      "On profile page, tap card to flip; instructions are visible; select a large image and adjust zoom and position before saving. Confirm card portrait and topbar avatar use the saved cropped image.",
+      "Tap an unread notification to open its full text/date and related-page button. Check read state after closing.",
+      "Switch light/dark themes and open digital excuse letters: check background, heading, body, badge contrast, and overlapping shapes.",
+      "As admin, use only user/admin invitations, account role approvals, technical reports and audit. Attempt obsolete /api/admin/section and /api/admin/import/commit and verify they are unavailable.",
+      "Submit a technical issue in Settings as Student/Faculty; verify it appears in the admin issue list and can be resolved; offline devices absent from reports must not be marked healthy."
     ],
     "expected": "A valid Student or Faculty selection activates the corresponding workspace after sign-in; Administrator access remains email-allowlist restricted."
   },
@@ -254,7 +268,8 @@
       "Digital Excuse class dates restricted to enrolled section timetable on backend; mismatched day rejected",
       "Class-day calendar hides nonmatching dates and allows future or missed scheduled days",
       "Digital Excuse faculty letter identifies enrolled student rather than anonymous signature",
-      "No overlapping date input, labels, pills and paper letter icons in portrait or landscape"
+      "No overlapping date input, labels, pills and paper letter icons in portrait or landscape",
+      "Existing server QR validity and 12-hour offline acceptance preserved without academic administrator rights."
     ],
     "description": "Regression-checks the established academic workflows after dashboard redesign.",
     "steps": [
@@ -332,7 +347,8 @@
       "Enable Reduce Motion and repeat week swipes, ID flip, and excuse expansion; functionality remains available without decorative animation.",
       "Submit a Monday/Wednesday subject excuse dated Tuesday directly to POST /api/excuses: 422. Submit on Monday or Wednesday with enrollment: accepted.",
       "Create MW subject excuse: only Monday/Wednesday dates clickable on current, past and next month; changing subject clears selection; direct Tuesday submission to backend rejected.",
-      "Open several excuse letters in Light and Dark modes, verify body text and student sender visible and no overlapping shapes/icons or native date-field overdraw."
+      "Open several excuse letters in Light and Dark modes, verify body text and student sender visible and no overlapping shapes/icons or native date-field overdraw.",
+      "Regression: scan QR online and offline as an enrolled student, verify 12-hour cached token checks and faculty review remain unchanged; admin cannot call academic section endpoints."
     ],
     "expected": "Attendance records and academic requests remain account-bound, persistent, and subject to faculty verification and decisions."
   },
