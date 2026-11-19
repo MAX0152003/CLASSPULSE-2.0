@@ -1,0 +1,17 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "installCommand": "echo 'ClassPulse uses the AppDeploy runtime; Vercel serves it via external rewrites'",
+  "buildCommand": "node -e \"require('fs').mkdirSync('proxy-dist',{recursive:true});require('fs').writeFileSync('proxy-dist/health.txt','ClassPulse Vercel proxy ready')\"",
+  "outputDirectory": "proxy-dist",
+  "rewrites": [
+    {
+      "source": "/",
+      "destination": "https://classpulse-h74wyx.v2.appdeploy.ai/"
+    },
+    {
+      "source": "/:path*",
+      "destination": "https://classpulse-h74wyx.v2.appdeploy.ai/:path*"
+    }
+  ]
+}
