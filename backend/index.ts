@@ -1,5 +1,5 @@
-import { router, json, error, requireAuth, db, storage, notifications, ws } from './vercel-sdk';
-import type { RouterMiddleware } from './vercel-sdk';
+import { router, json, error, requireAuth, db, storage, notifications, ws } from './vercel-sdk.js';
+import type { RouterMiddleware } from './vercel-sdk.js';
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 
 type Role = 'Student' | 'Faculty' | 'System Administrator';

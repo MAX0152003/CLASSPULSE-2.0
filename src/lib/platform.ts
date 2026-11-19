@@ -140,12 +140,31 @@ async function apiRequest(method:'GET'|'POST'|'PUT',path:string,body?:unknown){
     credentials:'same-origin',
     cache:'no-store',
   });
-  const text=await response.text();
+  const contentType=response.headers.get('content-type')||'';
+  const raw=await response.text();
   let data:unknown;
-  try{data=text?JSON.parse(text):{};}catch{throw Error('Server returned an invalid response.');}
+  if(contentType.includes('application/json')){
+    try{data=raw?JSON.parse(raw):{};}
+    catch{
+      throw Error('The ClassPulse server returned malformed JSON (HTTP '+response.status+'). Try refreshing the app.');
+    }
+  }else{
+    // A Vercel runtime crash/404/protection page is HTML, never an API reply.
+    // Do not expose provider HTML or raw response text to the user.
+    const reason=response.status===503
+      ?'ClassPulse backend configuration is incomplete.'
+      :response.status>=500
+        ?'ClassPulse backend is temporarily unavailable.'
+        :response.status===404
+          ?'ClassPulse API endpoint is missing from this deployment.'
+          :response.status===401||response.status===403
+            ?'The server blocked this request. Check your deployment access.'
+            :'The ClassPulse API returned a non-JSON response.';
+    throw Error(reason+' (HTTP '+response.status+').');
+  }
   if(!response.ok){
     const payload=data as {error?:string;message?:string};
-    throw Error(payload?.error||payload?.message||('Request failed ('+response.status+')'));
+    throw Error(payload?.error||payload?.message||('Request failed (HTTP '+response.status+')'));
   }
   return {data};
 }

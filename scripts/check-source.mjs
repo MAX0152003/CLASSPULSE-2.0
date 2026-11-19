@@ -35,7 +35,9 @@ const databaseSql=read('supabase/schema.sql');
 const cases={
   'No AppDeploy runtime imports in frontend':!app.includes("from '@appdeploy/client'"),
   'No AppDeploy runtime imports in backend':!api.includes("from '@appdeploy/sdk'"),
-  'Vercel API route uses existing backend':apiFunction.includes("from '../backend/index'"),
+  'Vercel API route uses ESM-safe backend import':apiFunction.includes("from '../backend/index.js'"),
+  'Backend uses ESM-safe SDK imports':api.includes("from './vercel-sdk.js'")&&api.includes("import type { RouterMiddleware } from './vercel-sdk.js'"),
+  'API client distinguishes HTML error pages from JSON':platform.includes("content-type")&&platform.includes('ClassPulse API endpoint is missing from this deployment.')&&platform.includes('ClassPulse backend is temporarily unavailable.'),
   'Supabase authenticated JWT checked server-side':adapter.includes('auth.getUser(ctx.bearer)'),
   'Supabase records are private':databaseSql.includes('enable row level security'),
   'Supabase transaction is caller-privileged':databaseSql.includes('security invoker')&&!databaseSql.includes('security definer'),
