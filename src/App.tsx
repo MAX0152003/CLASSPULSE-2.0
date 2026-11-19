@@ -1069,6 +1069,21 @@ export default function App() {
   const [recordFrom,setRecordFrom] = useState('');
   const [recordUntil,setRecordUntil] = useState('');
   const [expandedStudent, setExpandedStudent] = useState<string | null>(null);
+  const [inlineCorrection,setInlineCorrection]=useState<{sessionId:string;studentId:string;status:string;reason:string}|null>(null);
+  const [correctionSaving,setCorrectionSaving]=useState(false);
+  async function saveInlineCorrection() {
+    const draft=inlineCorrection;
+    if(!draft || draft.reason.trim().length<6 || correctionSaving)return;
+    setCorrectionSaving(true);
+    try {
+      await api.post('/api/attendance/review',draft);
+      setInlineCorrection(null);
+      if(selectedSubjectId)await loadFacultyRoster(selectedSubjectId,false);
+      showMessage('Attendance corrected and audit trail saved.');
+    } catch(e) {showMessage(apiMessage(e));}
+    finally {setCorrectionSaving(false);}
+  }
+
   const [selectedSubjectId, setSelectedSubjectId] = useState('');
   const [expandedSubjectId,setExpandedSubjectId] = useState<string|null>(null);
   const [busy, setBusy] = useState('');
@@ -2388,11 +2403,27 @@ export default function App() {
                         <div><strong>{dateFmt(r.capturedAt||r.receivedAt)}</strong>
                           <small>{r.verificationStatus.replace(/_/g,' ')} · {r.reviewReason||'QR attendance'}</small></div>
                         <Pill color={colorFor(r.academicStatus)}>{r.academicStatus}</Pill>
-                        <button className='cp-mini-btn' onClick={()=>{
-                          update('sessionId',r.sessionId);update('studentId',r.studentId);
-                          update('status',['PRESENT','LATE','ABSENT','EXCUSED'].includes(r.academicStatus)?r.academicStatus:'PRESENT');
-                          update('reason','');setModal('review');
-                        }}><FileCheck2 size={14}/> Correct</button>
+                        <button className='cp-mini-btn' aria-expanded={inlineCorrection?.sessionId===r.sessionId&&inlineCorrection?.studentId===r.studentId}
+                          onClick={()=>setInlineCorrection(current=>current?.sessionId===r.sessionId&&current.studentId===r.studentId?null:{
+                            sessionId:r.sessionId,studentId:r.studentId,
+                            status:['PRESENT','LATE','ABSENT','EXCUSED'].includes(r.academicStatus)?r.academicStatus:'PRESENT',
+                            reason:''
+                          })}><FileCheck2 size={14}/> Correct</button>
+                        {inlineCorrection?.sessionId===r.sessionId&&inlineCorrection.studentId===r.studentId&&
+                          <div className='cp-inline-correction'>
+                            <label className='cp-field'><span>Attendance status</span>
+                              <select value={inlineCorrection.status} onChange={e=>setInlineCorrection(v=>v?{...v,status:e.target.value}:v)}>
+                                {['PRESENT','LATE','ABSENT','EXCUSED'].map(value=><option key={value} value={value}>{value}</option>)}
+                              </select>
+                            </label>
+                            <label className='cp-field'><span>Reason for correction (audited)</span>
+                              <input value={inlineCorrection.reason} minLength={6} placeholder='At least 6 characters'
+                                onChange={e=>setInlineCorrection(v=>v?{...v,reason:e.target.value}:v)}/>
+                            </label>
+                            <button type='button' className='cp-mini-btn' disabled={correctionSaving||inlineCorrection.reason.trim().length<6}
+                              onClick={()=>void saveInlineCorrection()}><Check size={15}/> {correctionSaving?'Saving…':'Save record'}</button>
+                            <button type='button' className='cp-mini-btn' onClick={()=>setInlineCorrection(null)}>Cancel</button>
+                          </div>}
                       </div>):<p className='cp-chart-note'>No attendance records match the selected filters.</p>}
                       {(facultyRoster.corrections||[]).filter(c=>c.studentId===student.studentId)
                         .slice(0,5).map(c=><div className='cp-record-audit' key={c.id}>
