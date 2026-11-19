@@ -99,7 +99,7 @@ const cases={
  'Health endpoint is restricted':api.includes("'GET /api/admin/system-health': [requireAuth(),adminGuard"),
  'No hardcoded root admin email':api.includes("process.env.CLASSPULSE_ADMIN_EMAILS")&&!api.includes("farhanmakil15@gmail.com"),
  'System reports can be submitted and resolved':api.includes("'POST /api/system/issue':")&&api.includes("'POST /api/admin/system-issues/:id/resolve':"),
- 'Uploaded scans do not imply real-time device status':api.includes('Devices that have not synchronized cannot be monitored live'),
+ 'Uploaded scans do not imply real-time device status':api.includes('Offline devices and unreported crashes cannot be monitored live'),
  '12-hour offline QR validation preserved':api.includes('ageMs <= 12 * 60 * 60 * 1000'),
  'Gesture opens right-edge menu':app.includes('const navTouchStart=')&&app.includes('const navTouchEnd='),
  'Mobile landscape dock is right-aligned':css.includes('right:max(7px,env(safe-area-inset-right))'),
