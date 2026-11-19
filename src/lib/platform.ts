@@ -84,6 +84,29 @@ export const auth={
     });
     if(error)throw error;
   },
+  /**
+   * An email scanner may pre-visit links. Our custom recovery template
+   * arrives on ClassPulse with an unconsumed token hash, and only the
+   * user's explicit Continue action calls Supabase to verify that token.
+   */
+  async verifyRecoveryToken(tokenHash:string){
+    if(!/^[a-f0-9]{32,160}$/i.test(tokenHash))
+      throw Error('The password reset link is malformed. Request a new one.');
+    const {data,error}=await client().auth.verifyOtp({
+      type:'recovery',token_hash:tokenHash,
+    });
+    if(error)throw error;
+    if(!data.session||!data.user)
+      throw Error('Supabase did not start a password recovery session.');
+    return {userId:data.user.id,email:data.user.email};
+  },
+  onRecoverySession(callback:()=>void){
+    if(!supabase)return ()=>{};
+    const {data:{subscription}}=supabase.auth.onAuthStateChange((event,session)=>{
+      if(event==='PASSWORD_RECOVERY'&&session)callback();
+    });
+    return ()=>subscription.unsubscribe();
+  },
   async updatePassword(password:string){
     if(password.length<8)throw Error('Use a password with at least 8 characters.');
     const {error}=await client().auth.updateUser({password});

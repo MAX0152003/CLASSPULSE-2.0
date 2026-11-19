@@ -55,3 +55,24 @@ The app passes `?auth=confirmed` or `?auth=reset` to Supabase as the redirect de
 **Enable Confirm email** in Supabase Authentication > Providers > Email. Do not turn email verification off to make testing easier. Supabase's default email service is limited; configure your own SMTP provider before institutional use. Ensure the app's Vercel deployment protection settings allow invited students to open confirmation links (Vercel's SSO protection can block them before Supabase Auth starts).
 
 **Important:** Vercel still requires a server-only `SUPABASE_SERVICE_ROLE_KEY` before registration can complete the ClassPulse profile, and `CLASSPULSE_ADMIN_EMAILS` for the first administrator. Never expose either secret as a Vite variable or paste it into a chat.
+
+## Fixing expired recovery links caused by email link previews
+
+The recovery flow now supports a **two-stage, user-confirmed link**. Supabase's default `{{ .ConfirmationURL }}` goes to `/auth/v1/verify` immediately; Gmail/antivirus link scanners can consume its one-time token **before the student clicks it**. The ClassPulse app now accepts a recovery `token_hash` in its URL, holds it only in memory, removes it from the address bar, and does NOT verify it until the actual user selects **Continue securely**. If verification succeeds, the password update screen appears. Standard Supabase callback sessions still work via `PASSWORD_RECOVERY` event and `getUser()`.
+
+**Manual Supabase dashboard step (required):** go to Authentication → Email Templates → **Reset password** in the ClassPulse 2.0 project. Replace only the Reset password email body with the following HTML, then Save:
+
+```html
+<h2>Reset your ClassPulse password</h2>
+<p>We received a request to reset your password.</p>
+<p>Open ClassPulse below, then select <strong>Continue securely</strong>
+to verify this request and choose a new password.</p>
+<p><a href="{{ .RedirectTo }}&amp;token_hash={{ .TokenHash }}&amp;type=recovery">
+Continue to ClassPulse password reset
+</a></p>
+<p>If you did not request a reset, ignore this email.</p>
+```
+
+**Do not** use `{{ .ConfirmationURL }}` for the Reset password link in this configuration: it verifies immediately, which is susceptible to prefetching. Do not include actual passwords or API keys in email templates. Ensure Supabase Authentication URL Configuration includes the deployed Vercel origin and wildcard redirect for `/?auth=reset`. Disable click tracking/link wrapping in any email provider. This recovery-template change must be saved in Supabase; committing application code alone does not alter it. Links from emails sent **before** this change remain single-use and will not gain the new verification page.
+
+**Manual verification:** request one fresh password reset email, click its newly formatted link, confirm the user sees **Continue securely**, click it once, set a strong password, and sign in with the updated password. Check Supabase Auth logs for a successful recovery `verifyOtp` and password update. For expired/consumed tokens the app offers to request another reset. Do not work around the error by disabling email verification.

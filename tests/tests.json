@@ -73,7 +73,11 @@
       "Use Forgot password, request reset link; the reset URL opens the new-password form only after authenticated recovery, then update password and log back in.",
       "Verify no plaintext password appears in localStorage, sessionStorage, outgoing ClassPulse API JSON, or GitHub source (Supabase Auth SDK only).",
       "At width 320, 375, 430 and desktop, validate password fields, show/hide icons, Student/Faculty role controls, OAuth buttons and error messages do not overlap.",
-      "Verify external users can reach Vercel domain without Vercel-only authentication once site is intentionally made public; confirm Supabase Auth redirect allowlist."
+      "Verify external users can reach Vercel domain without Vercel-only authentication once site is intentionally made public; confirm Supabase Auth redirect allowlist.",
+      "Supabase Auth email template: replace Reset password link with .RedirectTo plus .TokenHash and type=recovery; use one new email (old links remain consumed).",
+      "Open new password reset email link: first screen says Continue securely (no token verified by GET); click it and verifyOtp consumes the token once, then new-password form appears.",
+      "Click the same reset link a second time: show specific recovery error and offer fresh reset; never claim existing session makes a consumed link valid.",
+      "After saving a new password, signed-out UI returns to Sign in and old password no longer works."
     ],
     "expected": "A valid Student or Faculty selection activates the corresponding workspace after sign-in; Administrator access remains email-allowlist restricted."
   },

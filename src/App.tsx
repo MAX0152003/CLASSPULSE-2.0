@@ -990,6 +990,7 @@ export default function App() {
   const [forgotPassword,setForgotPassword]=useState(false);
   const [resetEmailSent,setResetEmailSent]=useState(false);
   const [passwordRecoveryMode,setPasswordRecoveryMode]=useState(false);
+  const [pendingRecoveryToken,setPendingRecoveryToken]=useState('');
   const [recoveryPassword,setRecoveryPassword]=useState('');
   const [recoveryConfirm,setRecoveryConfirm]=useState('');
   const [pendingEmail,setPendingEmail]=useState('');
@@ -1319,6 +1320,28 @@ export default function App() {
     const hash=new URLSearchParams(window.location.hash.replace(/^#/,''));
     const authMode=query.get('auth');
     const linkError=query.get('error_description')||hash.get('error_description');
+    const tokenHash=authMode==='reset'&&query.get('type')==='recovery'
+      ?query.get('token_hash'):'';
+    const clearCallbackUrl=()=>window.history.replaceState({},'',window.location.pathname);
+    const unsubscribe=auth.onRecoverySession(()=>{
+      if(!mounted||tokenHash)return;
+      setPasswordRecoveryMode(true);
+      setAuthError('');setInitialized(true);
+    });
+    if(tokenHash){
+      // Email scanners can GET the URL, but cannot consume this token:
+      // verification happens only after the user's Continue button press.
+      setPendingRecoveryToken(tokenHash);
+      setEntryMode(null);setInitialized(true);
+      clearCallbackUrl();
+      return ()=>{mounted=false;unsubscribe();};
+    }
+    if(linkError&&authMode==='reset'){
+      setEntryMode('signin');setForgotPassword(true);
+      setAuthError(linkError+'. Request a new password reset email.');
+      setInitialized(true);clearCallbackUrl();
+      return ()=>{mounted=false;unsubscribe();};
+    }
     if(linkError){
       setEntryMode('signin');
       setAuthError(linkError+'. You may request a new confirmation or reset link.');
@@ -1366,7 +1389,7 @@ export default function App() {
         setAuthError(apiMessage(error));setEntryMode('signin');setInitialized(true);
       }
     });
-    return ()=>{mounted=false;};
+    return ()=>{mounted=false;unsubscribe();};
   },[]);
   useEffect(()=>{
     if(!authUser?.userId||!profile?.onboardingComplete||profile.deletedAt)return;
@@ -1768,6 +1791,21 @@ export default function App() {
     }catch(error){setAuthError(apiMessage(error));}
     finally{setAuthRedirecting(false);}
   }
+  async function confirmRecoveryLink(){
+    if(authRedirecting||!pendingRecoveryToken)return;
+    setAuthError('');setAuthRedirecting(true);
+    try{
+      const recovered=await auth.verifyRecoveryToken(pendingRecoveryToken);
+      setPendingRecoveryToken('');
+      setAuthUser(recovered);
+      setPasswordRecoveryMode(true);
+      setAuthError('');
+    }catch(error){
+      setPendingRecoveryToken('');
+      setEntryMode('signin');setForgotPassword(true);
+      setAuthError('This reset link could not be verified. It may already have been used or expired. Request a new email. '+apiMessage(error));
+    }finally{setAuthRedirecting(false);}
+  }
   async function finishPasswordReset(){
     if(authRedirecting)return;
     setAuthError('');
@@ -1781,8 +1819,12 @@ export default function App() {
     try{
       await auth.updatePassword(recoveryPassword);
       setRecoveryPassword('');setRecoveryConfirm('');
+      await auth.signOut();
       setPasswordRecoveryMode(false);
-      window.location.replace('/');
+      setAuthUser(null);setProfile(null);
+      setEntryMode('signin');setForgotPassword(false);
+      setAuthError('');
+      setAuthNotice('Password updated successfully. Sign in using your new password.');
     }catch(error){setAuthError(apiMessage(error));}
     finally{setAuthRedirecting(false);}
   }
@@ -1886,6 +1928,31 @@ export default function App() {
 
   if (!initialized) return <div className='cp-loading'><Brand/><div className='cp-spinner'/><span>Preparing your campus workspace…</span></div>;
 
+  if(pendingRecoveryToken)return <div className='cp-auth-page cp-auth-v2'>
+    <aside className='cp-auth-side'>
+      <Brand light/>
+      <div><span className='cp-eyebrow light'>ACCOUNT RECOVERY</span>
+        <h1>One quick<br/><em>security check.</em></h1>
+        <p>Your recovery link has opened ClassPulse. Confirm below to verify it securely.</p></div>
+      <small>MSU MAIN CAMPUS · CLASSPULSE</small>
+    </aside>
+    <main className='cp-auth-main'>
+      <section className='cp-auth-form cp-auth-form-v2'>
+        <div className='cp-auth-form-icon'><ShieldCheck size={23}/></div>
+        <span className='cp-auth-kicker'>VERIFY RESET REQUEST</span>
+        <h2>Continue to reset your password</h2>
+        <p className='cp-auth-subtitle'>This confirmation protects one-time reset links
+          against automatic email link previews. Only continue if you requested
+          this password reset yourself.</p>
+        {authError&&<p className='cp-auth-error' role='alert'>{authError}</p>}
+        <button className='cp-button dark full cp-auth-submit'
+          disabled={authRedirecting} onClick={()=>void confirmRecoveryLink()}>
+          {authRedirecting?'Verifying your link…':'Continue securely'}
+          {authRedirecting?<span className='cp-spinner small'/>:<ArrowRight size={17}/>}
+        </button>
+      </section>
+    </main>
+  </div>;
   if(passwordRecoveryMode)return <div className='cp-auth-page cp-auth-v2'>
     <aside className='cp-auth-side'>
       <Brand light/>
