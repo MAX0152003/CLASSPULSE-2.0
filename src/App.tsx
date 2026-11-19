@@ -1321,7 +1321,7 @@ export default function App() {
     const linkError=query.get('error_description')||hash.get('error_description');
     if(linkError){
       setEntryMode('signin');
-      setAuthError(linkError.replace(/\\+/g,' ')+'. You may request a new confirmation or reset link.');
+      setAuthError(linkError+'. You may request a new confirmation or reset link.');
     }
     auth.getUser().then(async user=>{
       if(!mounted)return;
@@ -1801,8 +1801,9 @@ export default function App() {
     });
     try { sessionStorage.removeItem(signupKey); } catch { /* Best effort cleanup. */ }
     setAuthError('');
-    await bootstrap();
-    await refreshDashboard();
+    const updatedProfile=await bootstrap();
+    if(updatedProfile.role==='System Administrator')await refreshAdministration();
+    else await refreshDashboard();
     showMessage('Your ClassPulse profile is ready.');
   }
   async function signOut() {
