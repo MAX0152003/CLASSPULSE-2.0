@@ -2606,3 +2606,25 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 @media (prefers-reduced-motion: reduce) {
   .cp-deck-card, .cp-button, .cp-drawer { animation: none !important; transition-duration: .01ms !important; }
 }
+
+/* Mobile form accessibility: avoid iOS focus zoom and preserve clear focus feedback. */
+@media (max-width: 900px) {
+  .cp-app input:not([type="checkbox"]):not([type="radio"]),
+  .cp-app select,
+  .cp-app textarea,
+  .cp-auth-page input,
+  .cp-auth-page select,
+  .cp-auth-page textarea,
+  .cp-registration input,
+  .cp-registration select {
+    font-size: max(16px, 1em);
+  }
+}
+.cp-app :is(input,select,textarea,button):focus-visible,
+.cp-auth-page :is(input,select,textarea,button):focus-visible {
+  outline: 3px solid #83b8ff;
+  outline-offset: 2px;
+}
+[data-theme="dark"] .cp-auth-page .cp-button.dark:focus-visible {
+  outline-color: #f5ffbe;
+}
