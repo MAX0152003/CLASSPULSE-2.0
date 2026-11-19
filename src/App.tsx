@@ -1004,6 +1004,38 @@ export default function App() {
   const [noticeFilter, setNoticeFilter] = useState<'all'|'unread'|'class'|'attendance'|'requests'>('all');
   const [idCardBack,setIdCardBack]=useState(false);
   const [drawer, setDrawer] = useState(false);
+  // Global edge navigation: preserve native scrolling and nested schedule-card gestures.
+  useEffect(() => {
+    let startX = 0, startY = 0, eligible = false;
+    const onStart = (event: TouchEvent) => {
+      if (event.touches.length !== 1) { eligible = false; return; }
+      const target = event.target as HTMLElement | null;
+      if (target?.closest('input, textarea, select, [contenteditable="true"], .cp-deck-card, .cp-deck, .cp-modal, [data-swipe-lock]')) {
+        eligible = false; return;
+      }
+      startX = event.touches[0].clientX;
+      startY = event.touches[0].clientY;
+      eligible = drawer || startX < Math.min(72, window.innerWidth * .18);
+    };
+    const onEnd = (event: TouchEvent) => {
+      if (!eligible || !event.changedTouches.length) return;
+      eligible = false;
+      const dx = event.changedTouches[0].clientX - startX;
+      const dy = event.changedTouches[0].clientY - startY;
+      if (Math.abs(dx) < 75 || Math.abs(dx) < Math.abs(dy) * 1.35) return;
+      // From the left screen edge, swipe right to reveal navigation;
+      // swipe left while the drawer is visible to dismiss it.
+      if (!drawer && dx > 0) setDrawer(true);
+      if (drawer && dx < 0) setDrawer(false);
+    };
+    document.addEventListener('touchstart', onStart, { passive: true });
+    document.addEventListener('touchend', onEnd, { passive: true });
+    return () => {
+      document.removeEventListener('touchstart', onStart);
+      document.removeEventListener('touchend', onEnd);
+    };
+  }, [drawer]);
+
   const [theme, setTheme] = useState<'light'|'dark'>(() => localStorage.getItem('cp-live-theme')==='dark'?'dark':'light');
   const [density, setDensity] = useState<'compact'|'comfortable'|'spacious'>(() => {
     const saved = localStorage.getItem('cp-view-density');
