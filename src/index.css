@@ -2568,3 +2568,41 @@ html[data-density='spacious'] .cp-panel label { font-size:max(17px, 1em); }
   .cp-record-student { transition: box-shadow .2s ease, transform .2s ease; }
   .cp-record-student:hover { transform:translateY(-1px); box-shadow:0 7px 22px rgba(19,38,70,.08); }
 }
+
+
+/* ClassPulse 2.0 responsive usability refinements — November 2026 */
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+.cp-auth-page input, .cp-auth-page select, .cp-auth-page textarea,
+.cp-app input, .cp-app select, .cp-app textarea {
+  font-size: max(16px, 1em);
+}
+.cp-record-filters { padding: 12px 14px; gap: 7px 9px; }
+.cp-record-filters .cp-field { gap: 3px; }
+.cp-record-filters .cp-field > span { font-size: 11px; line-height: 1.2; }
+.cp-record-filters input, .cp-record-filters select { min-height: 38px; padding-block: 7px; }
+.cp-record-export { min-height: 38px; }
+.cp-deck-days-top { margin-block: 6px 10px; }
+.cp-auth-page .cp-button.dark, [data-theme="dark"] .cp-auth-page .cp-button.dark {
+  background: #b6f265; color: #132119; border: 1px solid #b6f265;
+  box-shadow: 0 6px 24px rgba(144,209,76,.18);
+}
+.cp-auth-page .cp-button.dark:hover { background: #d0ffa1; }
+[data-density="spacious"] .cp-app,
+[data-density="spacious"] .cp-auth-page { font-size: 1.12rem; line-height: 1.6; }
+[data-density="spacious"] .cp-app button,
+[data-density="spacious"] .cp-app input,
+[data-density="spacious"] .cp-app select,
+[data-density="spacious"] .cp-auth-page button,
+[data-density="spacious"] .cp-auth-page input { font-size: max(16px, 1em); min-height: 46px; }
+[data-density="compact"] .cp-app { font-size: .94rem; }
+@media (max-width: 700px) {
+  .cp-deck-days-top { display: none !important; }
+  .cp-week-deck { min-width: 0; width: 100%; }
+  .cp-deck-stage { width: 100%; max-width: 100%; }
+  .cp-record-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cp-record-filters .cp-field:first-child,
+  .cp-record-filters .cp-field:nth-child(2) { grid-column: span 2; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cp-deck-card, .cp-button, .cp-drawer { animation: none !important; transition-duration: .01ms !important; }
+}
