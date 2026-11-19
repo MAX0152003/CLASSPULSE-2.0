@@ -93,6 +93,18 @@ type BrowserPushRecord={id:string;userId:string;subscription:{
   createdAt:string;updatedAt:string};
 const pushRecordId=(userId:string,endpoint:string)=>
   'push-'+createHash('sha256').update(userId+':'+endpoint).digest('hex').slice(0,40);
+function validBrowserPushEndpoint(endpoint:string){
+  try{
+    const u=new URL(endpoint);
+    if(u.protocol!=='https:'||u.username||u.password||u.port||u.hash)return false;
+    const host=u.hostname.toLowerCase();
+    return host==='fcm.googleapis.com'||
+      host==='push.services.mozilla.com'||
+      host.endsWith('.push.services.mozilla.com')||
+      host==='web.push.apple.com'||host.endsWith('.push.apple.com')||
+      host.endsWith('.notify.windows.com');
+  }catch{return false;}
+}
 function configureWebPush(){
   const publicKey=(process.env.CLASSPULSE_VAPID_PUBLIC_KEY||'').trim();
   const privateKey=(process.env.CLASSPULSE_VAPID_PRIVATE_KEY||'').trim();
@@ -1468,7 +1480,7 @@ export const handler = router({
     const keys=raw?.keys;
     const p256dh=typeof keys?.p256dh==='string'?keys.p256dh:'';
     const auth=typeof keys?.auth==='string'?keys.auth:'';
-    if(!endpoint.startsWith('https://')||endpoint.length>1800||
+    if(!validBrowserPushEndpoint(endpoint)||endpoint.length>1800||
       p256dh.length<30||p256dh.length>240||auth.length<10||auth.length>180){
       return error('Invalid browser push subscription',400);
     }
